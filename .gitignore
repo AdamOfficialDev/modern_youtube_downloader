@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+config.json
+download_history.json
+
+# Application specific
+downloads/
+ffmpeg/
+bundled/
+cookies/
+*.mp3
+*.mp4
+*.webm
+*.m4a
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+
+download_history.json
