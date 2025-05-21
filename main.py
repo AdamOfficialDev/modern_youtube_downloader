@@ -346,6 +346,9 @@ class ModernVideoDownloader(QMainWindow):
 
     def add_to_history(self):
         try:
+            # Get the URL from the input field
+            url = self.url_input.text().strip()
+
             history_entry = {
                 'title': self.title_label.text().replace("Title: ", ""),
                 'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -354,7 +357,8 @@ class ModernVideoDownloader(QMainWindow):
                 'status': 'Completed',
                 'channel': self.channel_label.text().replace("Channel: ", ""),
                 'duration': self.duration_label.text().replace("Duration: ", ""),
-                'views': self.views_label.text().replace("Views: ", "")
+                'views': self.views_label.text().replace("Views: ", ""),
+                'url': url
             }
             self.download_history.append(history_entry)
             self.save_history()
@@ -362,6 +366,27 @@ class ModernVideoDownloader(QMainWindow):
                 self.history_widget.update_history_display()
         except Exception as e:
             print(f"Error adding to history: {str(e)}")
+
+    def add_batch_download_to_history(self, title, format_id, output_dir, url="N/A"):
+        """Add a batch download to history"""
+        try:
+            history_entry = {
+                'title': title,
+                'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'format': format_id,
+                'output_dir': output_dir,
+                'status': 'Completed',
+                'channel': 'Batch Download',
+                'duration': 'N/A',
+                'views': 'N/A',
+                'url': url
+            }
+            self.download_history.append(history_entry)
+            self.save_history()
+            if hasattr(self, 'history_widget'):
+                self.history_widget.update_history_display()
+        except Exception as e:
+            print(f"Error adding batch download to history: {str(e)}")
 
     def update_status(self, status):
         try:
@@ -412,10 +437,16 @@ class ModernVideoDownloader(QMainWindow):
 
     def save_history(self):
         try:
+            # Save history to file
             with open('download_history.json', 'w') as f:
                 json.dump(self.download_history, f, indent=4)
+
+            # Update history widget if it exists
             if hasattr(self, 'history_widget'):
+                # Only update display without triggering another save operation
                 self.history_widget.set_download_history(self.download_history, update_display_only=True)
+
+            print(f"History saved successfully. Items: {len(self.download_history)}")
         except Exception as e:
             print(f"Error saving history: {e}")
 
@@ -593,7 +624,7 @@ class ModernVideoDownloader(QMainWindow):
         self.search_tab = QWidget()
         self.history_tab = QWidget()
         self.settings_tab = QWidget()
-        self.batch_downloader = BatchDownloadWidget()  # Initialize batch downloader
+        self.batch_downloader = BatchDownloadWidget(self)  # Initialize batch downloader with parent reference
 
         # Setup individual tabs
         self.setup_downloader_tab()

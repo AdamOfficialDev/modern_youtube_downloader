@@ -193,6 +193,7 @@ class BatchDownloadManager:
         self.output_dir = ""
         self.is_downloading = False
         self.max_retries = 3  # Maximum number of retry attempts
+        self.download_completed_callback = None  # Callback for when a download completes
 
     def add_to_list(self, url: str) -> None:
         """Add a URL to the download list without starting the download"""
@@ -315,6 +316,17 @@ class BatchDownloadManager:
         finally:
             self.mutex.unlock()
 
+    def set_download_completed_callback(self, callback):
+        """Set a callback function to be called when a download completes
+
+        The callback should accept four parameters:
+        - title: str - The title of the downloaded video
+        - format_id: str - The format ID used for the download
+        - output_dir: str - The output directory where the video was saved
+        - url: str - The URL of the downloaded video
+        """
+        self.download_completed_callback = callback
+
     def _update_status(self, url: str, status: DownloadStatus, error: str = "") -> None:
         self.mutex.lock()
         try:
@@ -322,6 +334,16 @@ class BatchDownloadManager:
                 download = self.downloads[url]
                 download.status = status
                 download.error = error
+
+                if status == DownloadStatus.COMPLETED:
+                    # Call the callback if it exists
+                    if self.download_completed_callback and download.title:
+                        self.download_completed_callback(
+                            download.title,
+                            self.format_id,
+                            self.output_dir,
+                            url  # Pass the URL to the callback
+                        )
 
                 if status in [DownloadStatus.COMPLETED, DownloadStatus.FAILED]:
                     if url in self.workers:
@@ -488,10 +510,18 @@ def create_vertical_line():
     return line
 
 class BatchDownloadWidget(QWidget):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
         self.download_manager = BatchDownloadManager()
         self.is_dark_mode = True
+
+        # Set up callback if parent exists
+        if self.parent and hasattr(self.parent, 'add_batch_download_to_history'):
+            self.download_manager.set_download_completed_callback(
+                self.parent.add_batch_download_to_history
+            )
+
         self.setup_ui()
 
     def setup_ui(self):
