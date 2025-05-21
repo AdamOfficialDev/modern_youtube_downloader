@@ -16,6 +16,7 @@ class SettingsTab:
     def __init__(self, parent=None):
         self.parent = parent
         self.current_version = self.get_ytdlp_version()
+        self.bot_manager = None
         self.setup_ui()
 
     def get_ytdlp_version(self):
@@ -685,6 +686,218 @@ class SettingsTab:
         ytdlp_group.setLayout(ytdlp_layout)
         layout.addWidget(ytdlp_group)
 
+        # Telegram Bot Settings
+        telegram_group = QGroupBox("")
+        telegram_group.setStyleSheet("""
+            QGroupBox {
+                border: 2px solid #7aa2f7;
+                border-radius: 8px;
+                margin-top: 0.5em;
+                padding-top: 5px;
+            }
+        """)
+        telegram_layout = QVBoxLayout(telegram_group)
+        telegram_layout.setSpacing(15)
+
+        # Custom header for Telegram Bot settings
+        telegram_header_container = QFrame()
+        telegram_header_layout = QHBoxLayout(telegram_header_container)
+        telegram_header_layout.setContentsMargins(0, 0, 0, 0)
+
+        telegram_header = QLabel("🤖 Telegram Bot Settings")
+        telegram_header.setStyleSheet("""
+            QLabel {
+                color: #7aa2f7;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 5px 10px;
+            }
+        """)
+        telegram_header_layout.addWidget(telegram_header)
+        telegram_header_layout.addStretch()
+        telegram_layout.addWidget(telegram_header_container)
+
+        # Telegram Bot notice
+        telegram_notice = QLabel("""
+            <div style='margin: 5px;'>
+                <span style='color: #7aa2f7;'>ℹ️ Enable a Telegram bot to download videos remotely</span><br><br>
+                This allows you to download videos through Telegram messages. Users can send video URLs to the bot,
+                and the bot will download them using this application.
+                <br><br>
+                <span style='color: #f7768e;'>⚠️ Make sure to keep your bot token private and secure.</span>
+            </div>
+        """)
+        telegram_notice.setStyleSheet("""
+            QLabel {
+                background-color: rgba(122, 162, 247, 0.1);
+                border: 1px solid #7aa2f7;
+                border-radius: 4px;
+                padding: 10px;
+                font-size: 13px;
+            }
+        """)
+        telegram_notice.setWordWrap(True)
+        telegram_notice.setTextFormat(Qt.TextFormat.RichText)
+        telegram_layout.addWidget(telegram_notice)
+
+        # Telegram Bot controls frame
+        telegram_frame = QFrame()
+        telegram_box_layout = QVBoxLayout(telegram_frame)
+        telegram_box_layout.setContentsMargins(15, 12, 15, 12)
+        telegram_box_layout.setSpacing(15)
+
+        # Bot Token input
+        token_layout = QHBoxLayout()
+        token_label = QLabel("Bot Token:")
+        token_label.setStyleSheet("QLabel { font-weight: bold; }")
+        self.telegram_token_input = QLineEdit()
+        self.telegram_token_input.setPlaceholderText("Enter your Telegram Bot Token")
+        self.telegram_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.telegram_token_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px 12px;
+                border: 2px solid #7aa2f7;
+                border-radius: 4px;
+                background: transparent;
+                selection-background-color: #7aa2f7;
+            }
+            QLineEdit:focus {
+                border: 2px solid #7aa2f7;
+                background: rgba(122, 162, 247, 0.1);
+            }
+        """)
+
+        # Show/Hide token button
+        self.show_token_button = QPushButton("🙈 Show")
+        self.show_token_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px 20px;
+                background-color: #7aa2f7;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8ab2ff;
+            }
+            QPushButton:pressed {
+                background-color: #6992e7;
+                padding-top: 9px;
+                padding-bottom: 7px;
+            }
+        """)
+        self.show_token_button.clicked.connect(self.toggle_token_visibility)
+
+        token_layout.addWidget(token_label)
+        token_layout.addWidget(self.telegram_token_input)
+        token_layout.addWidget(self.show_token_button)
+        telegram_box_layout.addLayout(token_layout)
+
+        # Admin usernames input
+        admin_layout = QHBoxLayout()
+        admin_label = QLabel("Admin Usernames:")
+        admin_label.setStyleSheet("QLabel { font-weight: bold; }")
+        self.admin_usernames_input = QLineEdit()
+        self.admin_usernames_input.setPlaceholderText("Enter admin usernames (comma-separated)")
+        self.admin_usernames_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px 12px;
+                border: 2px solid #7aa2f7;
+                border-radius: 4px;
+                background: transparent;
+                selection-background-color: #7aa2f7;
+            }
+            QLineEdit:focus {
+                border: 2px solid #7aa2f7;
+                background: rgba(122, 162, 247, 0.1);
+            }
+        """)
+
+        admin_layout.addWidget(admin_label)
+        admin_layout.addWidget(self.admin_usernames_input)
+        telegram_box_layout.addLayout(admin_layout)
+
+        # Bot status and controls
+        status_layout = QHBoxLayout()
+        self.bot_status_label = QLabel("Bot Status: Not Running")
+        self.bot_status_label.setStyleSheet("""
+            QLabel {
+                padding: 8px 15px;
+                background-color: rgba(255, 68, 68, 0.1);
+                border: 1px solid #ff4444;
+                border-radius: 4px;
+                color: #ff4444;
+                font-weight: bold;
+            }
+        """)
+
+        # Start/Stop bot button
+        self.toggle_bot_button = QPushButton("▶️ Start Bot")
+        self.toggle_bot_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px 20px;
+                background-color: #7aa2f7;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8ab2ff;
+            }
+            QPushButton:pressed {
+                background-color: #6992e7;
+                padding-top: 9px;
+                padding-bottom: 7px;
+            }
+        """)
+        self.toggle_bot_button.clicked.connect(self.toggle_bot)
+
+        status_layout.addWidget(self.bot_status_label)
+        status_layout.addWidget(self.toggle_bot_button)
+        status_layout.addStretch()
+        telegram_box_layout.addLayout(status_layout)
+
+        # Save Telegram settings button
+        save_telegram_btn = QPushButton("💾 Save Telegram Settings")
+        save_telegram_btn.setStyleSheet("""
+            QPushButton {
+                padding: 8px 20px;
+                background-color: #7aa2f7;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #8ab2ff;
+            }
+            QPushButton:pressed {
+                background-color: #6992e7;
+                padding-top: 9px;
+                padding-bottom: 7px;
+            }
+        """)
+        save_telegram_btn.clicked.connect(self._save_telegram_settings)
+        telegram_box_layout.addWidget(save_telegram_btn)
+
+        # Add help text
+        help_text = QLabel("""
+            <div style='padding: 10px; border-radius: 4px;'>
+                ℹ️ <span style='color: #808080;'>To create a Telegram bot, talk to @BotFather on Telegram and follow the instructions.</span>
+            </div>
+        """)
+        help_text.setWordWrap(True)
+        help_text.setTextFormat(Qt.TextFormat.RichText)
+        telegram_box_layout.addWidget(help_text)
+
+        telegram_layout.addWidget(telegram_frame)
+        layout.addWidget(telegram_group)
+
+        # Load current Telegram settings
+        self._load_telegram_settings()
+
         # Add stretch to push everything to the top
         layout.addStretch()
 
@@ -1344,6 +1557,182 @@ class SettingsTab:
                 f"Failed to update yt-dlp: {message}",
                 QMessageBox.StandardButton.Ok
             )
+
+    def toggle_token_visibility(self):
+        """Toggle visibility of the Telegram bot token."""
+        current_mode = self.telegram_token_input.echoMode()
+        if current_mode == QLineEdit.EchoMode.Password:
+            self.telegram_token_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_token_button.setText("🙉 Hide")
+        else:
+            self.telegram_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_token_button.setText("🙈 Show")
+
+    def toggle_bot(self):
+        """Start or stop the Telegram bot."""
+        # Import here to avoid circular imports
+        from src.telegram_bot_manager import TelegramBotManager
+
+        # Check if bot is running
+        if self.bot_manager and self.bot_manager.is_bot_running():
+            # Stop the bot
+            if self.bot_manager.stop_bot():
+                self.bot_status_label.setText("Bot Status: Not Running")
+                self.bot_status_label.setStyleSheet("""
+                    QLabel {
+                        padding: 8px 15px;
+                        background-color: rgba(255, 68, 68, 0.1);
+                        border: 1px solid #ff4444;
+                        border-radius: 4px;
+                        color: #ff4444;
+                        font-weight: bold;
+                    }
+                """)
+                self.toggle_bot_button.setText("▶️ Start Bot")
+                QMessageBox.information(
+                    self.parent,
+                    "Success",
+                    "Telegram bot stopped successfully!",
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                QMessageBox.warning(
+                    self.parent,
+                    "Error",
+                    "Failed to stop Telegram bot.",
+                    QMessageBox.StandardButton.Ok
+                )
+        else:
+            # Check if token is configured
+            if not self.parent.config.get("telegram_bot_token"):
+                QMessageBox.warning(
+                    self.parent,
+                    "Error",
+                    "Please configure and save your Telegram bot token first.",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+
+            # Create bot manager if needed
+            if not self.bot_manager:
+                self.bot_manager = TelegramBotManager(self.parent)
+
+            # Start the bot
+            if self.bot_manager.start_bot():
+                self.bot_status_label.setText("Bot Status: Running")
+                self.bot_status_label.setStyleSheet("""
+                    QLabel {
+                        padding: 8px 15px;
+                        background-color: rgba(68, 170, 68, 0.1);
+                        border: 1px solid #44aa44;
+                        border-radius: 4px;
+                        color: #44aa44;
+                        font-weight: bold;
+                    }
+                """)
+                self.toggle_bot_button.setText("⏹️ Stop Bot")
+                QMessageBox.information(
+                    self.parent,
+                    "Success",
+                    "Telegram bot started successfully!",
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                QMessageBox.warning(
+                    self.parent,
+                    "Error",
+                    "Failed to start Telegram bot. Check your token and try again.",
+                    QMessageBox.StandardButton.Ok
+                )
+
+    def _save_telegram_settings(self):
+        """Save Telegram bot settings."""
+        try:
+            # Get token and admin usernames
+            token = self.telegram_token_input.text().strip()
+            admin_usernames_text = self.admin_usernames_input.text().strip()
+
+            # Parse admin usernames
+            admin_usernames = []
+            if admin_usernames_text:
+                admin_usernames = [username.strip() for username in admin_usernames_text.split(',')]
+                # Remove @ symbol if present
+                admin_usernames = [username[1:] if username.startswith('@') else username for username in admin_usernames]
+
+            # Load existing config
+            config = self.parent.config
+
+            # Update config
+            config['telegram_bot_token'] = token
+            config['admin_users'] = admin_usernames
+
+            # Save config
+            self.parent.save_config()
+
+            QMessageBox.information(
+                self.parent,
+                "Success",
+                "Telegram bot settings saved successfully!",
+                QMessageBox.StandardButton.Ok
+            )
+
+            # If bot is running, restart it to apply new settings
+            if self.bot_manager and self.bot_manager.is_bot_running():
+                self.bot_manager.stop_bot()
+                self.bot_manager.start_bot()
+
+        except Exception as e:
+            QMessageBox.warning(
+                self.parent,
+                "Error",
+                f"Failed to save Telegram bot settings: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
+
+    def _load_telegram_settings(self):
+        """Load Telegram bot settings."""
+        try:
+            # Load config
+            config = self.parent.config
+
+            # Set token
+            token = config.get('telegram_bot_token', '')
+            self.telegram_token_input.setText(token)
+
+            # Set admin usernames
+            admin_usernames = config.get('admin_users', [])
+            self.admin_usernames_input.setText(', '.join(admin_usernames))
+
+            # Update bot status
+            if self.bot_manager and self.bot_manager.is_bot_running():
+                self.bot_status_label.setText("Bot Status: Running")
+                self.bot_status_label.setStyleSheet("""
+                    QLabel {
+                        padding: 8px 15px;
+                        background-color: rgba(68, 170, 68, 0.1);
+                        border: 1px solid #44aa44;
+                        border-radius: 4px;
+                        color: #44aa44;
+                        font-weight: bold;
+                    }
+                """)
+                self.toggle_bot_button.setText("⏹️ Stop Bot")
+            else:
+                self.bot_status_label.setText("Bot Status: Not Running")
+                self.bot_status_label.setStyleSheet("""
+                    QLabel {
+                        padding: 8px 15px;
+                        background-color: rgba(255, 68, 68, 0.1);
+                        border: 1px solid #ff4444;
+                        border-radius: 4px;
+                        color: #ff4444;
+                        font-weight: bold;
+                    }
+                """)
+                self.toggle_bot_button.setText("▶️ Start Bot")
+
+        except Exception as e:
+            print(f"Error loading Telegram bot settings: {e}")
 
     def get_available_browsers(self):
         """Get a list of browsers that are likely to be installed on the system."""

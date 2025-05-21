@@ -672,6 +672,12 @@ class ModernVideoDownloader(QMainWindow):
             if self.is_downloading and self.download_thread:
                 self.download_thread.terminate()
                 self.download_thread.wait()
+
+            # Stop Telegram bot if running
+            if hasattr(self.settings_widget, 'bot_manager') and self.settings_widget.bot_manager:
+                if self.settings_widget.bot_manager.is_bot_running():
+                    self.settings_widget.bot_manager.stop_bot()
+
             event.accept()
         else:
             event.ignore()
