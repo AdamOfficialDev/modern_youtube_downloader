@@ -273,8 +273,17 @@ class BatchDownloadManager:
         self.mutex.lock()
         try:
             self.is_downloading = True
-            for url, download in self.downloads.items():
-                if download.status == DownloadStatus.PENDING and url not in self.workers:
+
+            # Count how many workers we can start
+            available_slots = self.max_concurrent - len(self.workers)
+
+            if available_slots > 0:
+                # Get all pending downloads
+                pending_downloads = [(url, download) for url, download in self.downloads.items()
+                                    if download.status == DownloadStatus.PENDING and url not in self.workers]
+
+                # Start up to max_concurrent downloads
+                for url, download in pending_downloads[:available_slots]:
                     self.start_download(url)
         finally:
             self.mutex.unlock()
@@ -355,6 +364,10 @@ class BatchDownloadManager:
                     # Check if all downloads are finished
                     if not self.workers:
                         self.is_downloading = False
+                    else:
+                        # Start new downloads if there are pending ones and we have capacity
+                        if self.is_downloading:
+                            self.start_downloads()
         finally:
             self.mutex.unlock()
 
@@ -370,6 +383,9 @@ class BatchDownloadManager:
     def pause_all(self) -> None:
         self.mutex.lock()
         try:
+            # Set downloading flag to false to indicate paused state
+            self.is_downloading = False
+
             for worker in self.workers.values():
                 worker.pause()
         finally:
@@ -378,6 +394,10 @@ class BatchDownloadManager:
     def resume_all(self) -> None:
         self.mutex.lock()
         try:
+            # Set downloading flag to true to indicate active state
+            if self.workers:
+                self.is_downloading = True
+
             for worker in self.workers.values():
                 worker.resume()
         finally:
@@ -388,8 +408,18 @@ class BatchDownloadManager:
         try:
             for worker in self.workers.values():
                 worker.stop()
+
+            # Clear workers and reset downloading state
             self.workers.clear()
             self.is_downloading = False
+
+            # Reset all downloads to pending state
+            for download in self.downloads.values():
+                if download.status == DownloadStatus.DOWNLOADING or download.status == DownloadStatus.PAUSED:
+                    download.status = DownloadStatus.PENDING
+                    download.progress = 0.0
+                    download.speed = ""
+                    download.eta = ""
         finally:
             self.mutex.unlock()
 
@@ -565,6 +595,7 @@ class BatchDownloadWidget(QWidget):
         self.url_input = QTextEdit()
         self.url_input.setPlaceholderText("https://youtube.com/watch?v=...\nhttps://vimeo.com/...\nhttps://dailymotion.com/video/...")
         self.url_input.setMinimumHeight(100)
+        self.url_input.textChanged.connect(self.on_url_input_changed)
 
         url_layout.addWidget(url_label)
         url_layout.addWidget(self.url_input)
@@ -597,9 +628,9 @@ class BatchDownloadWidget(QWidget):
 
         # Connect button signals
         self.start_btn.clicked.connect(self.start_downloads)
-        self.pause_btn.clicked.connect(self.download_manager.pause_all)
-        self.resume_btn.clicked.connect(self.download_manager.resume_all)
-        self.stop_btn.clicked.connect(self.download_manager.stop_all)
+        self.pause_btn.clicked.connect(self.pause_downloads)
+        self.resume_btn.clicked.connect(self.resume_downloads)
+        self.stop_btn.clicked.connect(self.stop_downloads)
 
         # Add buttons to layout
         button_layout.addWidget(self.start_btn)
@@ -609,6 +640,9 @@ class BatchDownloadWidget(QWidget):
         button_layout.addStretch()
 
         main_layout.addLayout(button_layout)
+
+        # Initialize button states
+        self.update_button_states()
 
         # Start update timer
         self.update_timer = self.startTimer(500)
@@ -668,33 +702,106 @@ class BatchDownloadWidget(QWidget):
                     item.setBackground(bg_color)
                     item.setForeground(text_color)
 
+    def has_valid_urls(self):
+        """Check if there are valid URLs in the input field"""
+        text = self.url_input.toPlainText().strip()
+        if not text:
+            return False
+
+        # Check for at least one valid URL
+        for url in [url.strip() for url in text.split('\n') if url.strip()]:
+            if url.startswith('http://') or url.startswith('https://'):
+                return True
+
+        return False
+
+    def on_url_input_changed(self):
+        """Handle URL input changes and update button states"""
+        self.update_button_states()
+
+    def update_button_states(self):
+        """Update the state of all control buttons based on current download status"""
+        is_downloading = self.download_manager.is_downloading
+        has_downloads = len(self.download_manager.downloads) > 0
+        has_workers = len(self.download_manager.workers) > 0
+        has_valid_input = self.has_valid_urls()
+        has_save_dir = bool(self.save_path_input.text())
+
+        # Determine if we're in an active or paused download state
+        is_in_download_process = has_workers  # If we have workers, we're in a download process (active or paused)
+
+        # Control button states based on current state
+        # Start button should only be enabled when:
+        # 1. We have valid URLs or pending downloads
+        # 2. We have a save directory
+        # 3. We are NOT in any download process (not downloading and no workers)
+        self.start_btn.setEnabled((has_downloads or has_valid_input) and not is_in_download_process and has_save_dir)
+
+        # Pause button only enabled when actively downloading
+        self.pause_btn.setEnabled(has_workers and is_downloading)
+
+        # Resume button only enabled when paused (has workers but not downloading)
+        self.resume_btn.setEnabled(has_workers and not is_downloading)
+
+        # Stop button enabled whenever we have workers (active or paused)
+        self.stop_btn.setEnabled(has_workers)
+
+        # Disable controls during any download process (active or paused)
+        # This ensures controls remain disabled even when paused
+        self.control_panel.concurrent_spin.setEnabled(not is_in_download_process)
+        self.control_panel.format_combo.setEnabled(not is_in_download_process)
+        self.save_path_input.setEnabled(not is_in_download_process)
+        self.browse_btn.setEnabled(not is_in_download_process)
+        self.url_input.setEnabled(not is_in_download_process)
+
     def timerEvent(self, event):
         self.update_download_table()
-
-        # Update button and control states based on download status
-        is_downloading = self.download_manager.is_downloading
-        self.start_btn.setEnabled(not is_downloading)
-
-        # Disable controls during download
-        self.control_panel.concurrent_spin.setEnabled(not is_downloading)
-        self.control_panel.format_combo.setEnabled(not is_downloading)
-        self.save_path_input.setEnabled(not is_downloading)
-        self.browse_btn.setEnabled(not is_downloading)
-        self.url_input.setEnabled(not is_downloading)  # Disable URL input during downloads
+        self.update_button_states()
 
         # Update overall progress and status
         progress, completed, total = self.download_manager.get_total_progress()
-        self.total_progress.setMaximum(total)
+        self.total_progress.setMaximum(total if total > 0 else 100)
         self.total_progress.setValue(completed)
         self.total_progress.setFormat(f"Overall Progress: {progress:.1f}% ({completed}/{total})")
 
         # Update status label
+        is_downloading = self.download_manager.is_downloading
         if is_downloading:
             self.status_label.setText(f"Downloading: {completed}/{total} completed")
         elif total == 0:
             self.status_label.setText("Ready")
         else:
             self.status_label.setText(f"Paused: {completed}/{total} completed")
+
+    def pause_downloads(self):
+        """Pause all active downloads"""
+        self.download_manager.pause_all()
+        # Immediately update UI to reflect paused state
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(True)
+        self.start_btn.setEnabled(False)  # Ensure Start button is disabled when paused
+        self.update_button_states()
+        self.status_label.setText("Downloads paused")
+
+    def resume_downloads(self):
+        """Resume all paused downloads"""
+        self.download_manager.resume_all()
+        # Immediately update UI to reflect resumed state
+        self.pause_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)  # Ensure Start button is disabled when resumed
+        self.update_button_states()
+        self.status_label.setText("Downloads resumed")
+
+    def stop_downloads(self):
+        """Stop all downloads"""
+        self.download_manager.stop_all()
+        # Immediately update UI to reflect stopped state
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
+        # Start button will be enabled by update_button_states if there are valid URLs
+        self.update_button_states()
+        self.status_label.setText("Downloads stopped")
 
     def select_save_directory(self):
         directory = QFileDialog.getExistingDirectory(
@@ -706,6 +813,8 @@ class BatchDownloadWidget(QWidget):
         if directory:
             self.save_path_input.setText(directory)
             self.download_manager.output_dir = directory
+            # Update button states to enable Start button if we have valid URLs
+            self.update_button_states()
 
     def start_downloads(self):
         # Check if save directory is selected
@@ -723,7 +832,10 @@ class BatchDownloadWidget(QWidget):
         invalid_urls = []
         duplicate_urls = []
 
+        # Process URLs from the text input field
+        has_input_urls = False
         for url in [url.strip() for url in self.url_input.toPlainText().split('\n') if url.strip()]:
+            has_input_urls = True
             # Basic URL validation - must start with http:// or https://
             if not (url.startswith('http://') or url.startswith('https://')):
                 invalid_urls.append(url)
@@ -754,20 +866,35 @@ class BatchDownloadWidget(QWidget):
             if not urls:  # If no valid URLs remain
                 return
 
-        if not urls:
-            QMessageBox.warning(
-                self,
-                "No URLs",
-                "Please enter at least one valid video URL to download.",
-                QMessageBox.StandardButton.Ok
-            )
+        # Check if we have any URLs to download
+        existing_downloads = len(self.download_manager.downloads)
+        if not urls and not existing_downloads:
+            # Only show warning if user actually entered something but all were invalid
+            if has_input_urls:
+                QMessageBox.warning(
+                    self,
+                    "No Valid URLs",
+                    "Please enter at least one valid video URL to download.",
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "No URLs",
+                    "Please enter at least one video URL to download.",
+                    QMessageBox.StandardButton.Ok
+                )
             return
 
         # Show feedback about number of videos to download
+        pending_downloads = sum(1 for _, download in self.download_manager.downloads.items()
+                              if download.status == DownloadStatus.PENDING)
+        total_to_download = len(urls) + pending_downloads
+
         response = QMessageBox.question(
             self,
             "Start Downloads",
-            f"Start downloading {len(urls)} videos?",
+            f"Start downloading {total_to_download} videos?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -794,8 +921,24 @@ class BatchDownloadWidget(QWidget):
         # Clear the URL input after adding to queue
         self.url_input.clear()
 
+        # Set the output directory
+        self.download_manager.output_dir = self.save_path_input.text()
+
+        # Set max concurrent downloads
+        self.download_manager.max_concurrent = self.control_panel.concurrent_spin.value()
+
         # Start the downloads
         self.download_manager.start_downloads()
 
-        # Disable start button while downloading
+        # Update button states immediately
         self.start_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+        # Ensure all input controls are disabled during download
+        self.control_panel.concurrent_spin.setEnabled(False)
+        self.control_panel.format_combo.setEnabled(False)
+        self.save_path_input.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.url_input.setEnabled(False)
