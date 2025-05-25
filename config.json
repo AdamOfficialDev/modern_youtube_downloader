@@ -14,7 +14,7 @@
     "admin_users": [
         "adamreal"
     ],
-    "youtube_api_key": "AIzaSyALvsAodfJ6pcOJCZoCwvwnClDw-nKuh9Am",
+    "youtube_api_key": "AIzaSyALvsAodfJ6pcOJCZoCwvwnClDw-nKuh9A",
     "max_downloads_per_user": 5,
     "allowed_formats": [
         "mp4",

@@ -85,8 +85,11 @@ ping localhost -n 2 >nul
 :: Check and Download FFmpeg
 echo.
 echo    [*] Checking FFmpeg...
-if exist "bundled\ffmpeg.zip" (
-    echo    [√] FFmpeg already exists in bundled/ffmpeg.zip
+if exist "ffmpeg\ffmpeg.exe" (
+    echo    [√] FFmpeg is already installed and ready to use
+) else if exist "bundled\ffmpeg.zip" (
+    echo    [√] FFmpeg zip file exists in bundled folder
+    echo    [!] Note: FFmpeg zip exists but may need to be extracted to ffmpeg folder
 ) else (
     echo    [*] Downloading FFmpeg...
     echo.
@@ -147,7 +150,11 @@ echo  ================================================================
 echo.
 echo    [√] Python is installed
 echo    [√] All required packages are installed
-echo    [√] FFmpeg is downloaded and configured
+if exist "ffmpeg\ffmpeg.exe" (
+    echo    [√] FFmpeg is installed and configured
+) else (
+    echo    [√] FFmpeg is downloaded ^(may need extraction^)
+)
 echo    [√] Configuration files are created
 echo    [√] YouTube authentication support is configured
 echo    [√] Your system is ready to use Modern YouTube Downloader!
