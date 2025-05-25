@@ -173,6 +173,9 @@ class TelegramBotTab:
         main_layout.addWidget(scroll)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Initialize bot manager
+        self.bot_manager = None
+
         # Load current settings
         self.load_bot_settings()
 
@@ -719,20 +722,12 @@ class TelegramBotTab:
             # Import and start bot manager
             from src.telegram_bot_manager import TelegramBotManager
 
-            # Ensure settings_widget exists
-            if not hasattr(self.parent, 'settings_widget') or not self.parent.settings_widget:
-                QMessageBox.warning(
-                    self.parent,
-                    "Peringatan",
-                    "Settings widget belum diinisialisasi. Silakan buka tab Settings terlebih dahulu!"
-                )
-                return
+            # Create bot manager if needed
+            if not self.bot_manager:
+                self.bot_manager = TelegramBotManager(self.parent)
 
-            if not hasattr(self.parent.settings_widget, 'bot_manager') or not self.parent.settings_widget.bot_manager:
-                self.parent.settings_widget.bot_manager = TelegramBotManager(self.parent)
-
-            if not self.parent.settings_widget.bot_manager.is_bot_running():
-                success = self.parent.settings_widget.bot_manager.start_bot()
+            if not self.bot_manager.is_bot_running():
+                success = self.bot_manager.start_bot()
                 if success:
                     self.update_bot_status()
                     QMessageBox.information(
@@ -763,62 +758,48 @@ class TelegramBotTab:
     def stop_bot(self):
         """Stop the Telegram bot"""
         try:
-            if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                    if self.parent.settings_widget.bot_manager.is_bot_running():
-                        # Disable buttons during stop
-                        self.start_bot_btn.setEnabled(False)
-                        self.stop_bot_btn.setEnabled(False)
-                        self.restart_bot_btn.setEnabled(False)
+            if self.bot_manager and self.bot_manager.is_bot_running():
+                # Disable buttons during stop
+                self.start_bot_btn.setEnabled(False)
+                self.stop_bot_btn.setEnabled(False)
+                self.restart_bot_btn.setEnabled(False)
 
-                        # Show stopping status
-                        self.bot_status_display.setText("⏹️ Stopping...")
+                # Show stopping status
+                self.bot_status_display.setText("⏹️ Stopping...")
 
-                        # Use threading to prevent UI freeze
-                        import threading
-                        def stop_process():
-                            try:
-                                success = self.parent.settings_widget.bot_manager.stop_bot()
+                # Use threading to prevent UI freeze
+                import threading
+                def stop_process():
+                    try:
+                        success = self.bot_manager.stop_bot()
 
-                                # Update UI in main thread
-                                QTimer.singleShot(100, lambda: self.update_bot_status())
+                        # Update UI in main thread
+                        QTimer.singleShot(100, lambda: self.update_bot_status())
 
-                                if success:
-                                    QTimer.singleShot(200, lambda: QMessageBox.information(
-                                        self.parent,
-                                        "Sukses",
-                                        "Bot Telegram berhasil dihentikan!"
-                                    ))
-                                else:
-                                    QTimer.singleShot(200, lambda: QMessageBox.warning(
-                                        self.parent,
-                                        "Peringatan",
-                                        "Bot mungkin sudah berhenti atau ada masalah saat menghentikan."
-                                    ))
-                            except Exception as e:
-                                print(f"Error in stop process: {e}")
-                                QTimer.singleShot(100, lambda: self.update_bot_status())
-                                QTimer.singleShot(200, lambda: QMessageBox.critical(
-                                    self.parent,
-                                    "Error",
-                                    f"Error menghentikan bot: {str(e)}"
-                                ))
-
-                        stop_thread = threading.Thread(target=stop_process, daemon=True)
-                        stop_thread.start()
-
-                    else:
-                        QMessageBox.information(
+                        if success:
+                            QTimer.singleShot(200, lambda: QMessageBox.information(
+                                self.parent,
+                                "Sukses",
+                                "Bot Telegram berhasil dihentikan!"
+                            ))
+                        else:
+                            QTimer.singleShot(200, lambda: QMessageBox.warning(
+                                self.parent,
+                                "Peringatan",
+                                "Bot mungkin sudah berhenti atau ada masalah saat menghentikan."
+                            ))
+                    except Exception as e:
+                        print(f"Error in stop process: {e}")
+                        QTimer.singleShot(100, lambda: self.update_bot_status())
+                        QTimer.singleShot(200, lambda: QMessageBox.critical(
                             self.parent,
-                            "Info",
-                            "Bot tidak sedang berjalan!"
-                        )
-                else:
-                    QMessageBox.information(
-                        self.parent,
-                        "Info",
-                        "Bot tidak sedang berjalan!"
-                    )
+                            "Error",
+                            f"Error menghentikan bot: {str(e)}"
+                        ))
+
+                stop_thread = threading.Thread(target=stop_process, daemon=True)
+                stop_thread.start()
+
             else:
                 QMessageBox.information(
                     self.parent,
@@ -851,10 +832,8 @@ class TelegramBotTab:
             def restart_process():
                 try:
                     # Stop first
-                    if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                        if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                            if self.parent.settings_widget.bot_manager.is_bot_running():
-                                self.parent.settings_widget.bot_manager.stop_bot()
+                    if self.bot_manager and self.bot_manager.is_bot_running():
+                        self.bot_manager.stop_bot()
 
                     # Wait a moment for cleanup
                     import time
@@ -886,10 +865,9 @@ class TelegramBotTab:
         """Update bot status display"""
         try:
             is_running = False
-            # Check if parent has settings_widget attribute
-            if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                    is_running = self.parent.settings_widget.bot_manager.is_bot_running()
+            # Check if bot manager exists and is running
+            if self.bot_manager:
+                is_running = self.bot_manager.is_bot_running()
 
             if is_running:
                 self.bot_status_display.setText("✅ Berjalan")
@@ -942,23 +920,19 @@ class TelegramBotTab:
 
             # Try to get real user data from bot manager
             users_data = []
-            # Safely check if settings_widget exists and has bot_manager
-            if (hasattr(self.parent, 'settings_widget') and
-                self.parent.settings_widget and
-                hasattr(self.parent.settings_widget, 'bot_manager') and
-                self.parent.settings_widget.bot_manager):
-                if self.parent.settings_widget.bot_manager.is_bot_running():
-                    # Try to get user data from bot instance
-                    try:
-                        bot_instance = self.parent.settings_widget.bot_manager.bot_instance
-                        print(f"Bot instance: {bot_instance}")
-                        if bot_instance and hasattr(bot_instance, 'get_user_stats'):
-                            users_data = bot_instance.get_user_stats()
-                            print(f"Got user data from bot: {len(users_data)} users")
-                        else:
-                            print("Bot instance doesn't have get_user_stats method")
-                    except Exception as e:
-                        print(f"Error getting user data from bot: {e}")
+            # Check if bot manager exists and is running
+            if self.bot_manager and self.bot_manager.is_bot_running():
+                # Try to get user data from bot instance
+                try:
+                    bot_instance = self.bot_manager.bot_instance
+                    print(f"Bot instance: {bot_instance}")
+                    if bot_instance and hasattr(bot_instance, 'get_user_stats'):
+                        users_data = bot_instance.get_user_stats()
+                        print(f"Got user data from bot: {len(users_data)} users")
+                    else:
+                        print("Bot instance doesn't have get_user_stats method")
+                except Exception as e:
+                    print(f"Error getting user data from bot: {e}")
 
             # If no real data available, check if we have any stored user data
             if not users_data:
@@ -1153,22 +1127,17 @@ class TelegramBotTab:
             # If no log files found, show status message
             if not log_content:
                 current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                    if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                        if self.parent.settings_widget.bot_manager.is_bot_running():
-                            log_content = f"[{current_time}] 🤖 Bot sedang berjalan dan siap menerima perintah\n"
-                            log_content += f"[{current_time}] 📝 Log aktivitas akan muncul di sini secara real-time\n"
-                            log_content += f"[{current_time}] 💡 Kirim pesan ke bot untuk melihat log aktivitas\n"
-                            log_content += f"[{current_time}] 🔄 Monitoring log setiap detik...\n"
-                        else:
-                            log_content = f"[{current_time}] ⏹️ Bot tidak sedang berjalan\n"
-                            log_content += f"[{current_time}] ▶️ Klik 'Mulai Bot' untuk memulai\n"
-                    else:
-                        log_content = f"[{current_time}] ⚙️ Bot manager belum diinisialisasi\n"
-                        log_content += f"[{current_time}] 🔧 Konfigurasi bot terlebih dahulu\n"
+                if self.bot_manager and self.bot_manager.is_bot_running():
+                    log_content = f"[{current_time}] 🤖 Bot sedang berjalan dan siap menerima perintah\n"
+                    log_content += f"[{current_time}] 📝 Log aktivitas akan muncul di sini secara real-time\n"
+                    log_content += f"[{current_time}] 💡 Kirim pesan ke bot untuk melihat log aktivitas\n"
+                    log_content += f"[{current_time}] 🔄 Monitoring log setiap detik...\n"
+                elif self.bot_manager:
+                    log_content = f"[{current_time}] ⏹️ Bot tidak sedang berjalan\n"
+                    log_content += f"[{current_time}] ▶️ Klik 'Mulai Bot' untuk memulai\n"
                 else:
-                    log_content = f"[{current_time}] ⚙️ Settings widget belum diinisialisasi\n"
-                    log_content += f"[{current_time}] 🔧 Buka tab Settings terlebih dahulu\n"
+                    log_content = f"[{current_time}] ⚙️ Bot manager belum diinisialisasi\n"
+                    log_content += f"[{current_time}] 🔧 Konfigurasi bot terlebih dahulu\n"
                 file_updated = True  # Always update status messages
 
             # Only update display if content changed or file was updated
@@ -1268,32 +1237,26 @@ class TelegramBotTab:
             uptime = "00:00:00"
 
             # Try to get real statistics from bot manager
-            if (hasattr(self.parent, 'settings_widget') and
-                self.parent.settings_widget and
-                hasattr(self.parent.settings_widget, 'bot_manager') and
-                self.parent.settings_widget.bot_manager):
-                bot_manager = self.parent.settings_widget.bot_manager
+            if self.bot_manager and self.bot_manager.is_bot_running():
+                # Calculate uptime
+                if hasattr(self.bot_manager, 'start_time'):
+                    start_time = self.bot_manager.start_time
+                    current_time = datetime.datetime.now()
+                    uptime_delta = current_time - start_time
+                    hours, remainder = divmod(int(uptime_delta.total_seconds()), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    uptime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-                if bot_manager.is_bot_running():
-                        # Calculate uptime
-                        if hasattr(bot_manager, 'start_time'):
-                            start_time = bot_manager.start_time
-                            current_time = datetime.datetime.now()
-                            uptime_delta = current_time - start_time
-                            hours, remainder = divmod(int(uptime_delta.total_seconds()), 3600)
-                            minutes, seconds = divmod(remainder, 60)
-                            uptime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-                        # Try to get user statistics from bot instance
-                        try:
-                            bot_instance = bot_manager.bot_instance
-                            if bot_instance and hasattr(bot_instance, 'get_statistics'):
-                                stats = bot_instance.get_statistics()
-                                total_users = stats.get('total_users', 0)
-                                active_users = stats.get('active_users', 0)
-                                total_downloads = stats.get('total_downloads', 0)
-                        except Exception as e:
-                            print(f"Error getting bot statistics: {e}")
+                # Try to get user statistics from bot instance
+                try:
+                    bot_instance = self.bot_manager.bot_instance
+                    if bot_instance and hasattr(bot_instance, 'get_statistics'):
+                        stats = bot_instance.get_statistics()
+                        total_users = stats.get('total_users', 0)
+                        active_users = stats.get('active_users', 0)
+                        total_downloads = stats.get('total_downloads', 0)
+                except Exception as e:
+                    print(f"Error getting bot statistics: {e}")
 
             # If no real data from bot, try to get from stored files
             if total_users == 0:
@@ -1383,24 +1346,21 @@ class TelegramBotTab:
     def update_uptime_display(self):
         """Update uptime display in real-time"""
         try:
-            if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                    bot_manager = self.parent.settings_widget.bot_manager
-                    if bot_manager.is_bot_running() and hasattr(bot_manager, 'start_time'):
-                        start_time = bot_manager.start_time
-                        current_time = datetime.datetime.now()
-                        uptime_delta = current_time - start_time
-                        hours, remainder = divmod(int(uptime_delta.total_seconds()), 3600)
-                        minutes, seconds = divmod(remainder, 60)
-                        uptime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            if self.bot_manager and self.bot_manager.is_bot_running() and hasattr(self.bot_manager, 'start_time'):
+                start_time = self.bot_manager.start_time
+                current_time = datetime.datetime.now()
+                uptime_delta = current_time - start_time
+                hours, remainder = divmod(int(uptime_delta.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                uptime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-                        # Update uptime in statistics (use correct attribute name)
-                        if hasattr(self, 'uptime_label'):
-                            self.uptime_label.setText(f"⏱️ Uptime: {uptime}")
-                    else:
-                        # Bot not running, show 00:00:00
-                        if hasattr(self, 'uptime_label'):
-                            self.uptime_label.setText("⏱️ Uptime: 00:00:00")
+                # Update uptime in statistics (use correct attribute name)
+                if hasattr(self, 'uptime_label'):
+                    self.uptime_label.setText(f"⏱️ Uptime: {uptime}")
+            else:
+                # Bot not running, show 00:00:00
+                if hasattr(self, 'uptime_label'):
+                    self.uptime_label.setText("⏱️ Uptime: 00:00:00")
 
         except Exception as e:
             print(f"Error updating uptime display: {e}")
@@ -1409,12 +1369,9 @@ class TelegramBotTab:
         """Update user status in bot's user data"""
         try:
             # Try to update via bot instance first
-            if hasattr(self.parent, 'settings_widget') and self.parent.settings_widget:
-                if hasattr(self.parent.settings_widget, 'bot_manager') and self.parent.settings_widget.bot_manager:
-                    bot_manager = self.parent.settings_widget.bot_manager
-                    if bot_manager.is_bot_running() and bot_manager.bot_instance:
-                        if hasattr(bot_manager.bot_instance, 'update_user_status'):
-                            return bot_manager.bot_instance.update_user_status(int(user_id), new_status)
+            if self.bot_manager and self.bot_manager.is_bot_running() and self.bot_manager.bot_instance:
+                if hasattr(self.bot_manager.bot_instance, 'update_user_status'):
+                    return self.bot_manager.bot_instance.update_user_status(int(user_id), new_status)
 
             # Fallback: update file directly
             user_data = self.load_user_data_from_file()
