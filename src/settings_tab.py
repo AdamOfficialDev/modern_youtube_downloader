@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QFrame, QLabel,
                              QCheckBox, QLineEdit, QPushButton, QApplication,
                              QWidget, QMessageBox, QGroupBox, QStyleFactory,
                              QProgressDialog, QScrollArea, QComboBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QPalette, QColor
 import json
 import os
@@ -248,13 +248,8 @@ class SettingsTab:
 
         api_box_layout.addLayout(buttons_layout)
 
-        # Load current API key
-        try:
-            with open('config.json', 'r') as f:
-                config = json.load(f)
-                self.parent.api_key_input.setText(config.get('youtube_api_key', ''))
-        except:
-            pass
+        # Load current API key from parent config
+        self.reload_api_key()
 
         self.api_box.setLayout(api_box_layout)
         api_layout.addWidget(self.api_box)
@@ -1344,20 +1339,29 @@ class SettingsTab:
         # Apply stylesheet to the main window and all child widgets
         self.parent.setStyleSheet(style)
 
-        # Force update all widgets
-        for widget in self.parent.findChildren(QWidget):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
-            widget.update()
+        # Optimize widget updates - only update visible widgets
+        try:
+            # Update main window first
+            self.parent.style().unpolish(self.parent)
+            self.parent.style().polish(self.parent)
+            self.parent.update()
 
-        # Update the tab widget separately
-        for i in range(self.parent.tabs.count()):
-            tab = self.parent.tabs.widget(i)
-            tab.setStyleSheet(style)
-            for child in tab.findChildren(QWidget):
-                child.style().unpolish(child)
-                child.style().polish(child)
-                child.update()
+            # Update current tab only for better performance
+            current_tab = self.parent.tabs.currentWidget()
+            if current_tab:
+                current_tab.setStyleSheet(style)
+                current_tab.style().unpolish(current_tab)
+                current_tab.style().polish(current_tab)
+                current_tab.update()
+
+                # Update only immediate children of current tab
+                for child in current_tab.findChildren(QWidget):
+                    if child.isVisible():
+                        child.style().unpolish(child)
+                        child.style().polish(child)
+                        child.update()
+        except Exception as e:
+            print(f"Error updating widget styles: {e}")
 
     def apply_style(self):
         app = QApplication.instance()
@@ -1416,34 +1420,72 @@ class SettingsTab:
                 )
                 return
 
-            # Load existing config or create new one
-            config = {}
-            try:
-                with open('config.json', 'r') as f:
-                    config = json.load(f)
-            except:
-                pass
+            # Update parent config
+            self.parent.config['youtube_api_key'] = new_api_key
 
-            # Update API key
-            config['youtube_api_key'] = new_api_key
+            # Save config using parent's save method
+            self.parent.save_config()
 
-            # Save config
-            with open('config.json', 'w') as f:
-                json.dump(config, f, indent=2)
+            print(f"API key saved to config: {'*' * len(new_api_key)}")
 
-            # Try to initialize YouTube API with new key
-            api = self.parent.setup_youtube_api(show_error=True)  # Show error when saving new key
-            if api is not None:
-                self.parent.youtube = api
-                QMessageBox.information(
-                    self.parent,
-                    "Success",
-                    "API key saved and validated successfully!",
-                    QMessageBox.StandardButton.Ok
-                )
-            else:
-                # setup_youtube_api already showed error message
-                pass
+            # Show "Validating..." status immediately for better UX
+            if hasattr(self.parent, 'update_api_status_label'):
+                self.parent.update_api_status_label("Validating...", is_error=False)
+
+            # Validate API key in background thread to avoid blocking UI
+            import threading
+            def validate_and_notify():
+                try:
+                    api = self.parent.setup_youtube_api(show_error=False)
+                    if api is not None:
+                        self.parent.youtube = api
+                        # Store results for main thread to process
+                        self._api_validation_result = ("success", None)
+                    else:
+                        self._api_validation_result = ("invalid", None)
+                except Exception as e:
+                    print(f"Error validating API key: {e}")
+                    self._api_validation_result = ("error", str(e))
+
+            validation_thread = threading.Thread(target=validate_and_notify, daemon=True)
+            validation_thread.start()
+
+            # Check for results periodically from main thread
+            def check_validation_result():
+                if hasattr(self, '_api_validation_result'):
+                    result_type, error_msg = self._api_validation_result
+                    delattr(self, '_api_validation_result')  # Clean up
+
+                    if result_type == "success":
+                        self.parent.update_api_status_label("Connected", is_error=False)
+                        QMessageBox.information(
+                            self.parent,
+                            "Success",
+                            "API key saved and validated successfully!",
+                            QMessageBox.StandardButton.Ok
+                        )
+                    elif result_type == "invalid":
+                        self.parent.update_api_status_label("Invalid Key", is_error=True)
+                        QMessageBox.warning(
+                            self.parent,
+                            "Warning",
+                            "API key saved but appears to be invalid. Please check your key.",
+                            QMessageBox.StandardButton.Ok
+                        )
+                    elif result_type == "error":
+                        self.parent.update_api_status_label("Error", is_error=True)
+                        QMessageBox.critical(
+                            self.parent,
+                            "Error",
+                            f"Error validating API key: {error_msg}",
+                            QMessageBox.StandardButton.Ok
+                        )
+                else:
+                    # Check again in 100ms if result not ready
+                    QTimer.singleShot(100, check_validation_result)
+
+            # Start checking for results
+            QTimer.singleShot(100, check_validation_result)
 
         except Exception as e:
             QMessageBox.warning(
@@ -1452,6 +1494,64 @@ class SettingsTab:
                 f"Failed to save API key: {str(e)}",
                 QMessageBox.StandardButton.Ok
             )
+
+    def reload_api_key(self):
+        """Reload API key from parent config"""
+        try:
+            # Reload config from file first
+            self.parent.config = self.parent.load_config()
+
+            # Update API key input immediately
+            api_key = self.parent.config.get('youtube_api_key', '')
+            self.parent.api_key_input.setText(api_key)
+            print(f"Reloaded API key from config: {'*' * len(api_key) if api_key else 'None'}")
+
+            # Update API status immediately for better responsiveness
+            if hasattr(self.parent, 'update_api_status_label'):
+                if api_key:
+                    # Show "Checking..." status immediately
+                    self.parent.update_api_status_label("Checking...", is_error=False)
+
+                    # Validate API key in background thread to avoid blocking UI
+                    import threading
+                    def validate_api():
+                        try:
+                            api = self.parent.setup_youtube_api(show_error=False)
+                            # Store result for main thread to process
+                            if api:
+                                self._reload_validation_result = ("connected", None)
+                            else:
+                                self._reload_validation_result = ("invalid", None)
+                        except Exception as e:
+                            print(f"Error validating API key: {e}")
+                            self._reload_validation_result = ("error", str(e))
+
+                    validation_thread = threading.Thread(target=validate_api, daemon=True)
+                    validation_thread.start()
+
+                    # Check for results periodically from main thread
+                    def check_reload_result():
+                        if hasattr(self, '_reload_validation_result'):
+                            result_type, error_msg = self._reload_validation_result
+                            delattr(self, '_reload_validation_result')  # Clean up
+
+                            if result_type == "connected":
+                                self.parent.update_api_status_label("Connected", is_error=False)
+                            elif result_type == "invalid":
+                                self.parent.update_api_status_label("Invalid Key", is_error=True)
+                            elif result_type == "error":
+                                self.parent.update_api_status_label("Error", is_error=True)
+                        else:
+                            # Check again in 100ms if result not ready
+                            QTimer.singleShot(100, check_reload_result)
+
+                    # Start checking for results
+                    QTimer.singleShot(100, check_reload_result)
+                else:
+                    self.parent.update_api_status_label("Not Connected", is_error=True)
+
+        except Exception as e:
+            print(f"Error reloading API key: {e}")
 
     def _save_settings(self):
         settings = {

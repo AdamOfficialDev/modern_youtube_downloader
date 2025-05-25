@@ -128,14 +128,14 @@ if not exist "src" (
 )
 
 :: Create config.json with proper structure if it doesn't exist
-if not exist "src\config.json" (
+if not exist "config.json" (
     echo    [*] Creating config.json with default structure...
-    echo { "ffmpeg_path": null, "youtube_cookies_path": null, "youtube_cookies_browser": null } > src\config.json
-    echo    [√] Created config.json with YouTube authentication support
+    echo { "ffmpeg_path": null, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": [] } > config.json
+    echo    [√] Created config.json with unified configuration
 ) else (
     echo    [*] Updating config.json structure...
-    :: Check if config.json has the required fields for YouTube authentication
-    python -c "import json; f=open('src\\config.json', 'r'); data=json.load(f); f.close(); data.setdefault('youtube_cookies_path', None); data.setdefault('youtube_cookies_browser', None); f=open('src\\config.json', 'w'); json.dump(data, f, indent=4); f.close(); print('[√] Updated config.json with YouTube authentication support')"
+    :: Check if config.json has the required fields
+    python -c "import json; f=open('config.json', 'r'); data=json.load(f); f.close(); data.setdefault('youtube_api_key', ''); data.setdefault('telegram_bot_token', ''); data.setdefault('admin_users', []); f=open('config.json', 'w'); json.dump(data, f, indent=4); f.close(); print('[√] Updated config.json with unified configuration')"
 )
 
 :: Setup complete

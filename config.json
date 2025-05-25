@@ -1,4 +1,24 @@
 {
-  "youtube_api_key": "AIzaSyDk19Vuz13j9wlclDHCIi7m5-6uftRLJxM",
-  "max_search_results": 50
+    "ffmpeg_path": "C:\\Users\\Adam  IPTEK\\Desktop\\modern_youtube_downloader\\ffmpeg\\ffmpeg.exe",
+    "youtube_cookies_path": "C:\\Users\\Adam  IPTEK\\Desktop\\modern_youtube_downloader\\src\\..\\cookies\\youtube_cookies_chrome.txt",
+    "youtube_cookies_browser": "chrome",
+    "use_alternative_auth": true,
+    "use_browser_profile": false,
+    "browser_profile_path": null,
+    "bypass_geo_restriction": true,
+    "use_tor_proxy": false,
+    "bypass_robot_detection": true,
+    "use_incognito_mode": true,
+    "random_user_agent": true,
+    "telegram_bot_token": "8061095582:AAGYoy_LcEedgPF79-daVlBl8XmMbDLyGuM",
+    "admin_users": [
+        "adamreal"
+    ],
+    "youtube_api_key": "AIzaSyALvsAodfJ6pcOJCZoCwvwnClDw-nKuh9Am",
+    "max_downloads_per_user": 5,
+    "allowed_formats": [
+        "mp4",
+        "mp3",
+        "webm"
+    ]
 }

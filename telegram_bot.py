@@ -424,6 +424,7 @@ class TelegramBot:
         # Admin commands
         self.application.add_handler(CommandHandler("stats", self.cmd_stats))
         self.application.add_handler(CommandHandler("logs", self.cmd_logs))
+        self.application.add_handler(CommandHandler("testblock", self.cmd_test_block))
 
         # Message handlers
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -472,6 +473,32 @@ class TelegramBot:
         user = update.effective_user
         logger.info(f"User {user.id} ({user.username}) started the bot")
 
+        # Check if user is blocked
+        logger.info(f"Checking if user {user.id} is blocked for /start command")
+        if self.is_user_blocked(user.id):
+            logger.warning(f"User {user.id} ({user.username}) is blocked, sending block message")
+            blocked_message = (
+                "🚫 **AKSES DITOLAK**\n\n"
+                "❌ Maaf, akun Anda telah diblokir oleh administrator.\n"
+                "🔒 Anda tidak dapat menggunakan layanan bot ini saat ini.\n\n"
+                "📞 **Untuk mengajukan banding:**\n"
+                "• Hubungi administrator bot\n"
+                "• Jelaskan alasan Anda ingin akses dikembalikan\n"
+                "• Tunggu keputusan dari admin\n\n"
+                "⚠️ Jangan spam atau membuat akun baru, hal ini dapat memperpanjang masa blokir."
+            )
+            try:
+                await update.message.reply_text(blocked_message, parse_mode="Markdown")
+                logger.info(f"Block message sent successfully to user {user.id}")
+            except Exception as e:
+                logger.error(f"Failed to send block message to user {user.id}: {e}")
+                # Fallback without markdown
+                await update.message.reply_text(blocked_message.replace("**", "").replace("*", ""))
+            return
+
+        # Update user activity for start command
+        self._update_user_activity(user.id, user.username, increment_download=False)
+
         # Set up bot commands for the menu
         await self._set_bot_commands()
 
@@ -496,6 +523,29 @@ class TelegramBot:
             update: Update object
             context: Context object
         """
+        user = update.effective_user
+
+        # Check if user is blocked
+        if self.is_user_blocked(user.id):
+            blocked_message = (
+                "🚫 **BANTUAN TIDAK TERSEDIA**\n\n"
+                "❌ Akun Anda telah diblokir oleh administrator.\n"
+                "❓ Anda tidak dapat mengakses bantuan saat ini.\n\n"
+                "📖 **Informasi umum:**\n"
+                "• Akun Anda dalam status diblokir\n"
+                "• Semua fitur bot tidak dapat diakses\n"
+                "• Termasuk halaman bantuan dan panduan\n\n"
+                "🔧 **Untuk mendapatkan bantuan:**\n"
+                "• Hubungi administrator bot langsung\n"
+                "• Jelaskan masalah atau pertanyaan Anda\n"
+                "• Minta klarifikasi tentang status akun\n\n"
+                "💡 **Catatan:** Admin dapat memberikan bantuan meskipun akun diblokir."
+            )
+            await update.message.reply_text(blocked_message, parse_mode="Markdown")
+            return
+
+        # Update user activity for help command
+        self._update_user_activity(user.id, user.username, increment_download=False)
         help_text = (
             "🔍 *Available Commands:*\n\n"
             "• Send any video URL to download it\n"
@@ -571,6 +621,26 @@ class TelegramBot:
         """
         user = update.effective_user
         logger.info(f"User {user.id} ({user.username}) used /download command")
+
+        # Check if user is blocked
+        if self.is_user_blocked(user.id):
+            blocked_message = (
+                "🚫 **DOWNLOAD DITOLAK**\n\n"
+                "❌ Akun Anda telah diblokir oleh administrator.\n"
+                "📥 Anda tidak dapat mengunduh video saat ini.\n\n"
+                "🔍 **Kemungkinan alasan pemblokiran:**\n"
+                "• Pelanggaran terms of service\n"
+                "• Penggunaan berlebihan (spam)\n"
+                "• Konten yang tidak sesuai\n"
+                "• Laporan dari pengguna lain\n\n"
+                "📞 **Untuk mengajukan banding:**\n"
+                "• Hubungi administrator bot\n"
+                "• Jelaskan situasi Anda dengan jelas\n"
+                "• Berikan bukti jika diperlukan\n\n"
+                "⏳ Proses review biasanya memakan waktu 1-3 hari kerja."
+            )
+            await update.message.reply_text(blocked_message, parse_mode="Markdown")
+            return
 
         # Check if URL was provided
         if not context.args:
@@ -648,6 +718,25 @@ class TelegramBot:
         user = update.effective_user
         logger.info(f"User {user.id} ({user.username}) used /audio command")
 
+        # Check if user is blocked
+        if self.is_user_blocked(user.id):
+            blocked_message = (
+                "🚫 **EKSTRAKSI AUDIO DITOLAK**\n\n"
+                "❌ Akun Anda telah diblokir oleh administrator.\n"
+                "🎵 Anda tidak dapat mengekstrak audio saat ini.\n\n"
+                "⚖️ **Kebijakan pemblokiran:**\n"
+                "• Berlaku untuk semua fitur bot\n"
+                "• Termasuk download video dan audio\n"
+                "• Tidak dapat diakali dengan command berbeda\n\n"
+                "🔄 **Langkah selanjutnya:**\n"
+                "• Tunggu hingga masa blokir berakhir, atau\n"
+                "• Hubungi admin untuk klarifikasi\n"
+                "• Patuhi aturan bot setelah akses dikembalikan\n\n"
+                "💡 **Tips:** Baca terms of service untuk menghindari pemblokiran di masa depan."
+            )
+            await update.message.reply_text(blocked_message, parse_mode="Markdown")
+            return
+
         # Check if URL was provided
         if not context.args:
             await update.message.reply_text(
@@ -700,6 +789,9 @@ class TelegramBot:
 
             # Send audio file
             await self._send_file(update, context, file_path, title, is_audio=True)
+
+            # Update user activity
+            self._update_user_activity(user.id, user.username, increment_download=True)
 
             # Update download status
             self._update_download_status(user_id, url, "completed")
@@ -818,6 +910,29 @@ class TelegramBot:
         user = update.effective_user
         logger.info(f"User {user.id} ({user.username}) opened the menu")
 
+        # Check if user is blocked
+        if self.is_user_blocked(user.id):
+            blocked_message = (
+                "🚫 **MENU TIDAK TERSEDIA**\n\n"
+                "❌ Akun Anda telah diblokir oleh administrator.\n"
+                "☰ Menu dan semua fitur tidak dapat diakses.\n\n"
+                "🔐 **Akses terbatas:**\n"
+                "• Menu utama: Diblokir\n"
+                "• Download video: Diblokir\n"
+                "• Ekstraksi audio: Diblokir\n"
+                "• Status download: Diblokir\n\n"
+                "📞 **Hubungi admin untuk:**\n"
+                "• Mengetahui alasan pemblokiran\n"
+                "• Mengajukan permohonan unblock\n"
+                "• Mendapatkan informasi lebih lanjut\n\n"
+                "⏰ **Pemblokiran bersifat sementara dan dapat dicabut oleh admin.**"
+            )
+            await update.message.reply_text(blocked_message, parse_mode="Markdown")
+            return
+
+        # Update user activity for menu command
+        self._update_user_activity(user.id, user.username, increment_download=False)
+
         menu_message = (
             "☰ *Main Menu*\n\n"
             "Please select an option from the menu below:"
@@ -838,6 +953,34 @@ class TelegramBot:
             context: Context object
         """
         text = update.message.text
+        user = update.effective_user
+
+        # Check if user is blocked
+        logger.info(f"Checking if user {user.id} is blocked for message: {text[:50]}...")
+        if self.is_user_blocked(user.id):
+            logger.warning(f"User {user.id} ({user.username}) is blocked, sending block message for text message")
+            blocked_message = (
+                "🚫 **PESAN DIBLOKIR**\n\n"
+                "❌ Akun Anda telah diblokir oleh administrator.\n"
+                "💬 Semua pesan dan command Anda tidak akan diproses.\n\n"
+                "🚨 **Status akun:** DIBLOKIR\n"
+                "📅 **Sejak:** Lihat riwayat dengan admin\n"
+                "🔒 **Akses:** Ditangguhkan sementara\n\n"
+                "📋 **Yang tidak dapat Anda lakukan:**\n"
+                "• Mengirim URL untuk download\n"
+                "• Menggunakan semua command bot\n"
+                "• Mengakses fitur apapun\n\n"
+                "📞 **Kontak admin untuk informasi lebih lanjut**\n"
+                "⚠️ **Peringatan:** Jangan spam pesan, ini dapat memperburuk situasi."
+            )
+            try:
+                await update.message.reply_text(blocked_message, parse_mode="Markdown")
+                logger.info(f"Block message sent successfully to user {user.id} for text message")
+            except Exception as e:
+                logger.error(f"Failed to send block message to user {user.id}: {e}")
+                # Fallback without markdown
+                await update.message.reply_text(blocked_message.replace("**", "").replace("*", ""))
+            return
 
         # Check if message is a URL
         if self._is_valid_url(text):
@@ -918,6 +1061,9 @@ class TelegramBot:
 
                 # Send video file
                 await self._send_file(update, context, file_path, title)
+
+                # Update user activity
+                self._update_user_activity(user.id, user.username, increment_download=True)
 
                 # Update download status
                 self._update_download_status(user_id, url, "completed")
@@ -1290,6 +1436,200 @@ class TelegramBot:
         if self.application:
             # Stop the application
             self.application.stop()
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Get bot statistics.
+
+        Returns:
+            Dictionary containing bot statistics
+        """
+        try:
+            # Load user data
+            user_data = self._load_user_data()
+
+            total_users = len(user_data)
+            active_users = 0
+            total_downloads = 0
+
+            # Calculate statistics
+            current_time = datetime.datetime.now()
+            for user in user_data:
+                downloads = user.get('download_count', 0)
+                total_downloads += downloads
+
+                # Check if user was active in last 30 days
+                last_activity = user.get('last_activity')
+                if last_activity:
+                    try:
+                        last_activity_date = datetime.datetime.fromisoformat(last_activity)
+                        if (current_time - last_activity_date).days <= 30:
+                            active_users += 1
+                    except:
+                        pass
+
+            return {
+                'total_users': total_users,
+                'active_users': active_users,
+                'total_downloads': total_downloads,
+                'uptime': (current_time - self.start_time).total_seconds() if hasattr(self, 'start_time') else 0
+            }
+        except Exception as e:
+            logger.error(f"Error getting statistics: {e}")
+            return {
+                'total_users': 0,
+                'active_users': 0,
+                'total_downloads': 0,
+                'uptime': 0
+            }
+
+    def get_user_stats(self) -> List[Dict[str, Any]]:
+        """
+        Get user statistics.
+
+        Returns:
+            List of user data dictionaries
+        """
+        try:
+            return self._load_user_data()
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+            return []
+
+    def _load_user_data(self) -> List[Dict[str, Any]]:
+        """Load user data from file."""
+        try:
+            user_data_file = "bot_users.json"
+            if os.path.exists(user_data_file):
+                with open(user_data_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading user data: {e}")
+        return []
+
+    def _save_user_data(self, user_data: List[Dict[str, Any]]) -> None:
+        """Save user data to file."""
+        try:
+            user_data_file = "bot_users.json"
+            with open(user_data_file, 'w', encoding='utf-8') as f:
+                json.dump(user_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error saving user data: {e}")
+
+    def _update_user_activity(self, user_id: int, username: str = None, increment_download: bool = True) -> None:
+        """Update user activity in database."""
+        try:
+            user_data = self._load_user_data()
+            current_time = datetime.datetime.now().isoformat()
+
+            # Find existing user or create new one
+            user_found = False
+            for user in user_data:
+                if user.get('user_id') == user_id:
+                    user['last_activity'] = current_time
+                    if username:
+                        user['username'] = username
+                    if increment_download:
+                        user['download_count'] = user.get('download_count', 0) + 1
+                    user_found = True
+                    break
+
+            if not user_found:
+                # Add new user
+                new_user = {
+                    'user_id': user_id,
+                    'username': username or f"user_{user_id}",
+                    'last_activity': current_time,
+                    'download_count': 1 if increment_download else 0,
+                    'status': 'Aktif'
+                }
+                user_data.append(new_user)
+
+            self._save_user_data(user_data)
+            logger.info(f"User activity updated: {username} (ID: {user_id}) - Download: {increment_download}")
+        except Exception as e:
+            logger.error(f"Error updating user activity: {e}")
+
+    def update_user_status(self, user_id: int, new_status: str) -> bool:
+        """Update user status (for blocking/unblocking)."""
+        try:
+            user_data = self._load_user_data()
+            user_found = False
+
+            for user in user_data:
+                if user.get('user_id') == user_id:
+                    user['status'] = new_status
+                    user_found = True
+                    break
+
+            if user_found:
+                self._save_user_data(user_data)
+                logger.info(f"User {user_id} status updated to {new_status}")
+                return True
+            else:
+                logger.warning(f"User {user_id} not found for status update")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error updating user status: {e}")
+            return False
+
+    def is_user_blocked(self, user_id: int) -> bool:
+        """Check if user is blocked."""
+        try:
+            user_data = self._load_user_data()
+            logger.info(f"Checking block status for user {user_id}. Total users in data: {len(user_data)}")
+
+            for user in user_data:
+                if user.get('user_id') == user_id:
+                    status = user.get('status')
+                    is_blocked = status == 'Diblokir'
+                    logger.info(f"User {user_id} found with status: {status}, blocked: {is_blocked}")
+                    return is_blocked
+
+            logger.info(f"User {user_id} not found in user data, treating as not blocked")
+            return False
+        except Exception as e:
+            logger.error(f"Error checking user block status: {e}")
+            return False
+
+    def create_test_blocked_user(self, user_id: int, username: str = "test_user") -> None:
+        """Create a test blocked user for debugging purposes."""
+        try:
+            user_data = self._load_user_data()
+
+            # Remove existing user if exists
+            user_data = [user for user in user_data if user.get('user_id') != user_id]
+
+            # Add blocked test user
+            blocked_user = {
+                'user_id': user_id,
+                'username': username,
+                'last_activity': datetime.datetime.now().isoformat(),
+                'download_count': 0,
+                'status': 'Diblokir'
+            }
+            user_data.append(blocked_user)
+
+            self._save_user_data(user_data)
+            logger.info(f"Created test blocked user: {user_id} ({username})")
+
+        except Exception as e:
+            logger.error(f"Error creating test blocked user: {e}")
+
+    async def cmd_test_block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Test command to block current user for testing purposes."""
+        user = update.effective_user
+        logger.info(f"User {user.id} ({user.username}) used /testblock command")
+
+        # Block the current user for testing
+        self.create_test_blocked_user(user.id, user.username or f"user_{user.id}")
+
+        await update.message.reply_text(
+            f"✅ User {user.username or user.id} has been blocked for testing.\n"
+            f"Try sending any message or command to test the block messages.\n"
+            f"Use the admin panel to unblock yourself."
+        )
 
     def integrate_with_main_app(self) -> None:
         """

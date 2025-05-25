@@ -75,15 +75,11 @@ def download_ffmpeg():
         # Update config.json with the FFmpeg path
         if ffmpeg_exe_path:
             print(f"Updating config.json with FFmpeg path: {ffmpeg_exe_path}")
-            config_dir = Path('src')
-            config_path = config_dir / 'config.json'
-
-            # Create config directory if it doesn't exist
-            config_dir.mkdir(exist_ok=True)
+            config_path = 'config.json'  # Use root directory config
 
             # Load existing config or create new one
             config = {}
-            if config_path.exists():
+            if os.path.exists(config_path):
                 try:
                     with open(config_path, 'r') as f:
                         config = json.load(f)

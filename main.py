@@ -35,6 +35,7 @@ from src.downloader_tab import DownloaderTab
 from src.history_tab import HistoryWidget
 from src.settings_tab import SettingsTab
 from src.search_tab import SearchTab
+from src.telegram_bot_tab import TelegramBotTab
 
 class ExportThread(QThread):
     finished_signal = pyqtSignal(bool, str)
@@ -199,7 +200,6 @@ class ModernVideoDownloader(QMainWindow):
 
         # Setup UI
         self.setup_ui()
-        self.settings_widget.apply_style()
 
         # Add About action
         self.about_action = self.menuBar().addMenu("Help").addAction("About")
@@ -214,8 +214,29 @@ class ModernVideoDownloader(QMainWindow):
         else:
             # Disable tabs and show settings tab
             self.update_tab_states(False)
-            settings_index = self.tabs.indexOf(self.settings_tab)
-            self.tabs.setCurrentIndex(settings_index)
+            # Settings tab should already be active from setup_ui()
+            # But ensure it's set correctly
+            self.tabs.setCurrentIndex(5)  # Settings tab
+
+            # Verification to ensure correct tab
+            QTimer.singleShot(100, lambda: self._ensure_settings_tab_active())
+
+        # Apply style after tab is set
+        self.settings_widget.apply_style()
+
+    def _ensure_settings_tab_active(self):
+        """Ensure Settings tab is active when API key is invalid"""
+        try:
+            current_index = self.tabs.currentIndex()
+            current_tab_name = self.tabs.tabText(current_index)
+
+            if current_tab_name != "Settings":
+                # Force switch to Settings tab
+                settings_index = 5  # Settings is at index 5
+                self.tabs.setCurrentIndex(settings_index)
+                self.tabs.setCurrentWidget(self.settings_tab)
+        except Exception as e:
+            print(f"Error ensuring Settings tab active: {e}")
 
     def changeEvent(self, event):
         if event.type() == event.Type.PaletteChange:
@@ -290,6 +311,9 @@ class ModernVideoDownloader(QMainWindow):
         layout.addWidget(self.history_widget)
         self.history_widget.set_download_history(self.download_history, update_display_only=True)  # Set initial history
 
+    def setup_telegram_bot_tab(self):
+        self.telegram_bot_widget = TelegramBotTab(self)
+
     def setup_settings_tab(self):
         self.settings_widget = SettingsTab(self)
 
@@ -311,18 +335,31 @@ class ModernVideoDownloader(QMainWindow):
 
     def load_config(self):
         """Load configuration from config.json"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src', 'config.json')
+        # Use config.json in root directory (same as other components)
+        config_path = 'config.json'
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
-                    return json.load(f)
-            except:
-                return {"ffmpeg_path": None}
-        return {"ffmpeg_path": None}
+                    config = json.load(f)
+                    # Ensure required fields exist
+                    if "ffmpeg_path" not in config:
+                        config["ffmpeg_path"] = None
+                    if "youtube_api_key" not in config:
+                        config["youtube_api_key"] = ""
+                    if "telegram_bot_token" not in config:
+                        config["telegram_bot_token"] = ""
+                    if "admin_users" not in config:
+                        config["admin_users"] = []
+                    return config
+            except Exception as e:
+                print(f"Error loading config: {e}")
+                return {"ffmpeg_path": None, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": []}
+        return {"ffmpeg_path": None, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": []}
 
     def save_config(self):
         """Save configuration to config.json"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src', 'config.json')
+        # Use config.json in root directory (same as other components)
+        config_path = 'config.json'
 
         # If ffmpeg_path is being set to null, remove the ffmpeg directory
         if self.config.get('ffmpeg_path') is None:
@@ -335,7 +372,6 @@ class ModernVideoDownloader(QMainWindow):
                 except Exception as e:
                     print(f"Error removing FFmpeg directory: {e}")
 
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, 'w') as f:
             json.dump(self.config, f, indent=4)
 
@@ -575,8 +611,9 @@ class ModernVideoDownloader(QMainWindow):
 
         # If current tab is disabled, switch to settings tab
         if not api_valid and self.tabs.currentIndex() in [downloader_index, batch_index, search_index]:
-            settings_index = self.tabs.indexOf(self.settings_tab)
+            settings_index = 5  # Settings is at index 5
             self.tabs.setCurrentIndex(settings_index)
+            print(f"Switched to Settings tab due to invalid API (index {settings_index})")
 
     def update_api_status_label(self, status, is_error=True):
         # Only update if label exists
@@ -607,10 +644,26 @@ class ModernVideoDownloader(QMainWindow):
 
     def on_tab_changed(self, index):
         try:
+            tab_name = self.tabs.tabText(index)
+
             # Reinitialize YouTube API when switching to search tab
-            if self.tabs.tabText(index) == "Search":
+            if tab_name == "Search":
                 if not hasattr(self, 'youtube') or self.youtube is None:
-                    self.youtube = self.setup_youtube_api(show_error=False)
+                    # Use threading to avoid blocking UI
+                    import threading
+                    def init_api():
+                        self.youtube = self.setup_youtube_api(show_error=False)
+
+                    api_thread = threading.Thread(target=init_api, daemon=True)
+                    api_thread.start()
+
+            # Reload API key when switching to settings tab (optimized)
+            elif tab_name == "Settings":
+                if hasattr(self, 'settings_widget') and self.settings_widget:
+                    # Use QTimer to defer the reload to avoid blocking tab switch
+                    QTimer.singleShot(50, lambda: self.settings_widget.reload_api_key())
+                    print("Scheduled API key reload for Settings tab")
+
         except Exception as e:
             print(f"Error in on_tab_changed: {str(e)}")
 
@@ -623,6 +676,7 @@ class ModernVideoDownloader(QMainWindow):
         self.downloader_tab = QWidget()
         self.search_tab = QWidget()
         self.history_tab = QWidget()
+        self.telegram_bot_tab = QWidget()
         self.settings_tab = QWidget()
         self.batch_downloader = BatchDownloadWidget(self)  # Initialize batch downloader with parent reference
 
@@ -630,6 +684,7 @@ class ModernVideoDownloader(QMainWindow):
         self.setup_downloader_tab()
         self.setup_search_tab()
         self.setup_history_tab()
+        self.setup_telegram_bot_tab()
         self.setup_settings_tab()
 
         # Add tabs to widget
@@ -637,7 +692,12 @@ class ModernVideoDownloader(QMainWindow):
         self.tabs.addTab(self.batch_downloader, "Batch Download")
         self.tabs.addTab(self.search_tab, "Search")
         self.tabs.addTab(self.history_tab, "History")
+        self.tabs.addTab(self.telegram_bot_tab, "Telegram Bot")
         self.tabs.addTab(self.settings_tab, "Settings")
+
+        # IMPORTANT: Set default tab to Settings immediately after adding tabs
+        # This prevents any other code from setting a different default
+        self.tabs.setCurrentIndex(5)  # Settings tab
 
         # Set the central widget
         self.setCentralWidget(self.tabs)
