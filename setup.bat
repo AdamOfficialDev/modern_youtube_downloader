@@ -21,23 +21,46 @@ ping localhost -n 2 >nul
 echo    [*] Checking system requirements...
 ping localhost -n 2 >nul
 
-:: Check if Python is installed
+:: Check if Python is installed and find Python executable
 echo    [*] Checking Python installation...
+set "PYTHON_CMD="
+
+:: Try different Python commands
 python --version >nul 2>&1
-if errorlevel 1 (
-    color 0C
-    echo.
-    echo    [X] Python is not installed on your system!
-    echo    [!] Please install Python from python.org first
-    echo.
-    echo  ================================================================
-    echo    Press any key to exit...
-    echo  ================================================================
-    pause >nul
-    exit
-) else (
-    echo    [√] Python is installed!
+if not errorlevel 1 (
+    set "PYTHON_CMD=python"
+    echo    [√] Python is installed! ^(using 'python'^)
+    goto :python_found
 )
+
+py --version >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=py"
+    echo    [√] Python is installed! ^(using 'py'^)
+    goto :python_found
+)
+
+python3 --version >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=python3"
+    echo    [√] Python is installed! ^(using 'python3'^)
+    goto :python_found
+)
+
+:: If no Python found
+color 0C
+echo.
+echo    [X] Python is not installed on your system!
+echo    [!] Please install Python from python.org first
+echo    [!] Make sure to check "Add Python to PATH" during installation
+echo.
+echo  ================================================================
+echo    Press any key to exit...
+echo  ================================================================
+pause >nul
+exit
+
+:python_found
 ping localhost -n 2 >nul
 
 :: Create necessary directories if they don't exist
@@ -64,12 +87,23 @@ if not exist "cookies" (
 echo.
 echo    [*] Installing required packages...
 echo.
-pip install -r requirements.txt
+
+:: Try pip directly first
+pip install -r requirements.txt >nul 2>&1
+if not errorlevel 1 (
+    echo    [√] All packages installed successfully! ^(using 'pip'^)
+    goto :packages_installed
+)
+
+:: If pip fails, try with Python -m pip
+echo    [*] Trying alternative pip method...
+%PYTHON_CMD% -m pip install -r requirements.txt
 if errorlevel 1 (
     color 0C
     echo.
     echo    [X] Failed to install required packages!
     echo    [!] Please check your internet connection and try again
+    echo    [!] You may need to run: %PYTHON_CMD% -m pip install --upgrade pip
     echo.
     echo  ================================================================
     echo    Press any key to exit...
@@ -78,8 +112,10 @@ if errorlevel 1 (
     exit
 ) else (
     echo.
-    echo    [√] All packages installed successfully!
+    echo    [√] All packages installed successfully! ^(using '%PYTHON_CMD% -m pip'^)
 )
+
+:packages_installed
 ping localhost -n 2 >nul
 
 :: Check and Download FFmpeg
@@ -93,7 +129,7 @@ if exist "ffmpeg\ffmpeg.exe" (
 ) else (
     echo    [*] Downloading FFmpeg...
     echo.
-    python download_ffmpeg.py
+    %PYTHON_CMD% download_ffmpeg.py
     if errorlevel 1 (
         echo.
         echo    [X] Failed to download FFmpeg!
@@ -138,7 +174,7 @@ if not exist "config.json" (
 ) else (
     echo    [*] Updating config.json structure...
     :: Check if config.json has the required fields
-    python -c "import json; f=open('config.json', 'r'); data=json.load(f); f.close(); data.setdefault('youtube_api_key', ''); data.setdefault('telegram_bot_token', ''); data.setdefault('admin_users', []); f=open('config.json', 'w'); json.dump(data, f, indent=4); f.close(); print('[√] Updated config.json with unified configuration')"
+    %PYTHON_CMD% -c "import json; f=open('config.json', 'r'); data=json.load(f); f.close(); data.setdefault('youtube_api_key', ''); data.setdefault('telegram_bot_token', ''); data.setdefault('admin_users', []); f=open('config.json', 'w'); json.dump(data, f, indent=4); f.close(); print('[√] Updated config.json with unified configuration')"
 )
 
 :: Setup complete
