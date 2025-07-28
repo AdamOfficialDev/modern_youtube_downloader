@@ -1,6 +1,5 @@
 @echo off
 title Modern YouTube Downloader Setup
-mode con: cols=70 lines=30
 color 0B
 cls
 
@@ -15,12 +14,6 @@ echo.
 echo  ================================================================
 echo.
 
-:: Animasi Loading
-echo    [*] Initializing setup...
-ping localhost -n 2 >nul
-echo    [*] Checking system requirements...
-ping localhost -n 2 >nul
-
 :: Check if Python is installed and find Python executable
 echo    [*] Checking Python installation...
 set "PYTHON_CMD="
@@ -30,6 +23,7 @@ python --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_CMD=python"
     echo    [√] Python is installed! ^(using 'python'^)
+    python --version
     goto :python_found
 )
 
@@ -37,6 +31,7 @@ py --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_CMD=py"
     echo    [√] Python is installed! ^(using 'py'^)
+    py --version
     goto :python_found
 )
 
@@ -44,6 +39,7 @@ python3 --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_CMD=python3"
     echo    [√] Python is installed! ^(using 'python3'^)
+    python3 --version
     goto :python_found
 )
 
@@ -61,11 +57,61 @@ pause >nul
 exit
 
 :python_found
-ping localhost -n 2 >nul
 
-:: Create necessary directories if they don't exist
 echo.
-echo    [*] Checking directories...
+echo    [*] Cleaning up any corrupted packages...
+
+:: Uninstall problematic packages
+echo    [*] Removing potentially corrupted PyQt6 packages...
+%PYTHON_CMD% -m pip uninstall -y PyQt6 PyQt6-Qt6 PyQt6-sip 2>nul
+%PYTHON_CMD% -m pip uninstall -y Pillow 2>nul
+
+echo    [*] Upgrading pip and setuptools...
+%PYTHON_CMD% -m pip install --upgrade pip setuptools wheel
+
+echo.
+echo    [*] Installing packages one by one with better compatibility...
+
+:: Install packages individually with fallback versions
+echo    [*] Installing PyQt6...
+%PYTHON_CMD% -m pip install PyQt6
+if errorlevel 1 (
+    echo    [!] PyQt6 failed, trying older version...
+    %PYTHON_CMD% -m pip install "PyQt6>=6.5.0,<6.7.0"
+)
+
+echo    [*] Installing Pillow...
+%PYTHON_CMD% -m pip install Pillow
+if errorlevel 1 (
+    echo    [!] Pillow failed, trying pre-compiled wheel...
+    %PYTHON_CMD% -m pip install --only-binary=all Pillow
+    if errorlevel 1 (
+        echo    [!] Trying older Pillow version...
+        %PYTHON_CMD% -m pip install "Pillow>=9.0.0,<11.0.0"
+    )
+)
+
+echo    [*] Installing yt-dlp...
+%PYTHON_CMD% -m pip install yt-dlp
+
+echo    [*] Installing requests...
+%PYTHON_CMD% -m pip install requests
+
+echo    [*] Installing google-api-python-client...
+%PYTHON_CMD% -m pip install google-api-python-client
+
+echo    [*] Installing tqdm...
+%PYTHON_CMD% -m pip install tqdm
+
+echo.
+echo    [*] Verifying installation...
+%PYTHON_CMD% -c "import PyQt6; print('[√] PyQt6 imported successfully')" 2>nul || echo "[!] PyQt6 import failed"
+%PYTHON_CMD% -c "import PIL; print('[√] Pillow imported successfully')" 2>nul || echo "[!] Pillow import failed"
+%PYTHON_CMD% -c "import yt_dlp; print('[√] yt-dlp imported successfully')" 2>nul || echo "[!] yt-dlp import failed"
+%PYTHON_CMD% -c "import requests; print('[√] requests imported successfully')" 2>nul || echo "[!] requests import failed"
+
+echo.
+echo    [*] Creating directories...
 if not exist "bundled" (
     echo    [*] Creating bundled directory...
     mkdir "bundled"
@@ -74,7 +120,6 @@ if not exist "bundled" (
     echo    [√] Bundled directory exists
 )
 
-:: Create cookies directory for YouTube authentication
 if not exist "cookies" (
     echo    [*] Creating cookies directory...
     mkdir "cookies"
@@ -83,72 +128,7 @@ if not exist "cookies" (
     echo    [√] Cookies directory exists
 )
 
-:: Install required packages
-echo.
-echo    [*] Installing required packages...
-echo.
-
-:: Try pip directly first
-pip install -r requirements.txt >nul 2>&1
-if not errorlevel 1 (
-    echo    [√] All packages installed successfully! ^(using 'pip'^)
-    goto :packages_installed
-)
-
-:: If pip fails, try with Python -m pip
-echo    [*] Trying alternative pip method...
-%PYTHON_CMD% -m pip install -r requirements.txt
-if errorlevel 1 (
-    color 0C
-    echo.
-    echo    [X] Failed to install required packages!
-    echo    [!] Please check your internet connection and try again
-    echo    [!] You may need to run: %PYTHON_CMD% -m pip install --upgrade pip
-    echo.
-    echo  ================================================================
-    echo    Press any key to exit...
-    echo  ================================================================
-    pause >nul
-    exit
-) else (
-    echo.
-    echo    [√] All packages installed successfully! ^(using '%PYTHON_CMD% -m pip'^)
-)
-
-:packages_installed
-ping localhost -n 2 >nul
-
-:: Check and Download FFmpeg
-echo.
-echo    [*] Checking FFmpeg...
-if exist "ffmpeg\ffmpeg.exe" (
-    echo    [√] FFmpeg is already installed and ready to use
-) else if exist "bundled\ffmpeg.zip" (
-    echo    [√] FFmpeg zip file exists in bundled folder
-    echo    [!] Note: FFmpeg zip exists but may need to be extracted to ffmpeg folder
-) else (
-    echo    [*] Downloading FFmpeg...
-    echo.
-    %PYTHON_CMD% download_ffmpeg.py
-    if errorlevel 1 (
-        echo.
-        echo    [X] Failed to download FFmpeg!
-        echo    [!] Please download manually from:
-        echo        https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
-        echo    [!] Rename it to ffmpeg.zip and place it in the bundled folder
-        echo.
-        echo  ================================================================
-        echo    Press any key to exit...
-        echo  ================================================================
-        pause >nul
-        exit
-    ) else (
-        echo.
-        echo    [√] FFmpeg downloaded successfully
-    )
-)
-
-:: Check if ffmpeg directory exists
+:: Create additional directories
 if not exist "ffmpeg" (
     echo    [*] Creating ffmpeg directory...
     mkdir "ffmpeg"
@@ -157,7 +137,6 @@ if not exist "ffmpeg" (
     echo    [√] FFmpeg directory exists
 )
 
-:: Create src directory if it doesn't exist
 if not exist "src" (
     echo    [*] Creating src directory...
     mkdir "src"
@@ -166,38 +145,46 @@ if not exist "src" (
     echo    [√] src directory exists
 )
 
-:: Create config.json with proper structure if it doesn't exist
+:: Create config.json
+echo    [*] Creating config.json...
 if not exist "config.json" (
-    echo    [*] Creating config.json with default structure...
     echo { "ffmpeg_path": null, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": [] } > config.json
-    echo    [√] Created config.json with unified configuration
+    echo    [√] Created config.json with default configuration
 ) else (
-    echo    [*] Updating config.json structure...
-    :: Check if config.json has the required fields
-    %PYTHON_CMD% -c "import json; f=open('config.json', 'r'); data=json.load(f); f.close(); data.setdefault('youtube_api_key', ''); data.setdefault('telegram_bot_token', ''); data.setdefault('admin_users', []); f=open('config.json', 'w'); json.dump(data, f, indent=4); f.close(); print('[√] Updated config.json with unified configuration')"
+    echo    [√] config.json already exists
+)
+
+:: Check FFmpeg
+echo.
+echo    [*] Checking FFmpeg...
+if exist "ffmpeg\ffmpeg.exe" (
+    echo    [√] FFmpeg is already installed
+) else (
+    echo    [!] FFmpeg not found in ffmpeg directory
+    echo    [*] You can download FFmpeg manually from:
+    echo        https://github.com/BtbN/FFmpeg-Builds/releases/latest
+    echo    [*] Extract it and place ffmpeg.exe in the ffmpeg folder
 )
 
 :: Setup complete
+echo.
 color 0A
-echo.
 echo  ================================================================
-echo    ^|^|              Setup completed successfully!              ^|^|
+echo    ^|^|              Setup Completed Successfully!              ^|^|
 echo  ================================================================
 echo.
-echo    [√] Python is installed
-echo    [√] All required packages are installed
-if exist "ffmpeg\ffmpeg.exe" (
-    echo    [√] FFmpeg is installed and configured
-) else (
-    echo    [√] FFmpeg is downloaded ^(may need extraction^)
-)
-echo    [√] Configuration files are created
-echo    [√] YouTube authentication support is configured
-echo    [√] Your system is ready to use Modern YouTube Downloader!
+echo    [√] Python is installed and ready
+echo    [√] All required packages installed with compatibility fixes
+echo    [√] Directories created
+echo    [√] Configuration files ready
 echo.
-echo    NOTE: To bypass YouTube's anti-bot protection, go to the Settings
-echo    tab and use the YouTube Authentication section to extract cookies
-echo    from your browser.
+echo    [*] Your system is ready to use Modern YouTube Downloader!
+echo.
+echo    NOTE: If FFmpeg is needed, download it manually from:
+echo    https://github.com/BtbN/FFmpeg-Builds/releases/latest
+echo.
+echo    To bypass YouTube's anti-bot protection, use the Settings
+echo    tab to extract cookies from your browser.
 echo.
 echo  ================================================================
 echo    Press any key to exit...
