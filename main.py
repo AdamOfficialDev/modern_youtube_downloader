@@ -671,6 +671,9 @@ class ModernVideoDownloader(QMainWindow):
         # Create tab widget
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.on_tab_changed)  # Connect tab change event
+        
+        # Apply professional tab styling
+        self.apply_professional_tab_style()
 
         # Create tabs
         self.downloader_tab = QWidget()
@@ -688,11 +691,11 @@ class ModernVideoDownloader(QMainWindow):
         self.setup_settings_tab()
 
         # Add tabs to widget
-        self.tabs.addTab(self.downloader_tab, "Single Download")
-        self.tabs.addTab(self.batch_downloader, "Batch Download")
+        self.tabs.addTab(self.downloader_tab, "Download")
+        self.tabs.addTab(self.batch_downloader, "Batch")
         self.tabs.addTab(self.search_tab, "Search")
         self.tabs.addTab(self.history_tab, "History")
-        self.tabs.addTab(self.telegram_bot_tab, "Telegram Bot")
+        self.tabs.addTab(self.telegram_bot_tab, "Bot")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # IMPORTANT: Set default tab to Settings immediately after adding tabs
