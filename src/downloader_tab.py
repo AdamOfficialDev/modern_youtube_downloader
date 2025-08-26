@@ -215,24 +215,25 @@ class DownloaderTab:
         # URL Input Section - Professional styling
         url_section = self.create_section("Video URL", is_primary=True)
         url_content = QVBoxLayout()
+        url_content.setSpacing(6)  # Tighter spacing
         
         # URL input with professional styling
         url_input_container = QHBoxLayout()
         self.parent.url_input = QLineEdit()
         self.parent.url_input.setPlaceholderText("Enter video URL from any platform...")
-        self.parent.url_input.setMinimumHeight(40)  # Professional height
+        self.parent.url_input.setMinimumHeight(34)  # Smaller height
         
         paste_button = QPushButton("Paste")
-        paste_button.setMinimumHeight(40)
-        paste_button.setMinimumWidth(80)
+        paste_button.setMinimumHeight(34)  # Smaller height
+        paste_button.setMinimumWidth(70)   # Smaller width
         paste_button.clicked.connect(self.paste_url)
         
         url_input_container.addWidget(self.parent.url_input)
         url_input_container.addWidget(paste_button)
         
-        # Add subtle help text
+        # Add subtle help text - smaller font
         help_text = QLabel("Supports YouTube, Vimeo, Dailymotion, and other platforms")
-        help_text.setStyleSheet("color: #666; font-size: 12px;")
+        help_text.setStyleSheet("color: #666; font-size: 11px;")
         
         url_content.addLayout(url_input_container)
         url_content.addWidget(help_text)
