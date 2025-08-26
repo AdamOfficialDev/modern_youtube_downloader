@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QApplication, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QLineEdit, QPushButton,
     QComboBox, QCheckBox, QProgressBar, QDialog, QTreeWidget, QTreeWidgetItem,
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QScrollArea, QWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap
