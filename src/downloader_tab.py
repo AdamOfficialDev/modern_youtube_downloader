@@ -242,35 +242,35 @@ class DownloaderTab:
         # Video Information Section - Clean professional layout
         info_section = self.create_section("Video Information")
         info_content = QHBoxLayout()
-        info_content.setSpacing(30)
+        info_content.setSpacing(20)  # Reduced spacing
         
         # Left side - Video details with professional typography
         info_details = QVBoxLayout()
-        info_details.setSpacing(12)
+        info_details.setSpacing(8)  # Tighter spacing between info items
         
         self.parent.title_label = QLabel("Title: -")
         self.parent.duration_label = QLabel("Duration: -")
         self.parent.channel_label = QLabel("Channel: -")
         self.parent.views_label = QLabel("Views: -")
 
-        # Apply professional styling to info labels
+        # Apply professional styling to info labels - more compact
         for label in [self.parent.title_label, self.parent.duration_label,
                      self.parent.channel_label, self.parent.views_label]:
             label.setStyleSheet("""
                 QLabel {
-                    font-size: 14px;
+                    font-size: 13px;
                     font-weight: 500;
-                    padding: 4px 0px;
+                    padding: 2px 0px;
                 }
             """)
             info_details.addWidget(label)
         
         info_details.addStretch()
         
-        # Right side - Thumbnail with professional frame
+        # Right side - Thumbnail with professional frame - smaller size
         thumbnail_container = QVBoxLayout()
         self.parent.thumbnail_label = QLabel()
-        self.parent.thumbnail_label.setFixedSize(280, 158)  # 16:9 aspect ratio
+        self.parent.thumbnail_label.setFixedSize(240, 135)  # Smaller 16:9 aspect ratio
         self.parent.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.parent.thumbnail_label.setStyleSheet("""
             QLabel {
@@ -290,22 +290,22 @@ class DownloaderTab:
         # Download Options Section - Professional controls
         options_section = self.create_section("Download Options")
         options_content = QVBoxLayout()
-        options_content.setSpacing(16)
+        options_content.setSpacing(10)  # Reduced spacing
         
         # Format selection row
         format_row = QHBoxLayout()
         format_label = QLabel("Quality:")
-        format_label.setMinimumWidth(80)
+        format_label.setMinimumWidth(70)  # Smaller width
         format_label.setStyleSheet("font-weight: 500;")
         
         self.parent.format_combo = QComboBox()
-        self.parent.format_combo.setMinimumWidth(200)
-        self.parent.format_combo.setMinimumHeight(36)
+        self.parent.format_combo.setMinimumWidth(180)  # Smaller width
+        self.parent.format_combo.setMinimumHeight(32)  # Smaller height
         self.parent.format_combo.setEnabled(False)
         
         self.show_formats_button = QPushButton("Advanced")
-        self.show_formats_button.setMinimumHeight(36)
-        self.show_formats_button.setMinimumWidth(100)
+        self.show_formats_button.setMinimumHeight(32)  # Smaller height
+        self.show_formats_button.setMinimumWidth(90)   # Smaller width
         self.show_formats_button.clicked.connect(self.show_formats_dialog)
         self.show_formats_button.setEnabled(False)
         
