@@ -799,34 +799,43 @@ class SettingsTab:
                     border-radius: 6px;
                 }
                 QTabWidget::pane {
-                    border: 2px solid #45475a;
-                    border-radius: 8px;
-                    top: -2px;
+                    border: 1px solid #404040;
+                    border-radius: 6px;
+                    margin-top: -1px;
+                    background-color: #2d2d2d;
                 }
                 QTabBar::tab {
-                    background: #2a2a3f;
-                    color: #cdd6f4;
-                    padding: 10px 25px;
-                    border: 2px solid #45475a;
-                    border-bottom: none;
-                    border-top-left-radius: 8px;
-                    border-top-right-radius: 8px;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                                stop: 0 #404040, stop: 1 #2d2d2d);
+                    border: 1px solid #555555;
+                    border-bottom-color: transparent;
+                    border-top-left-radius: 6px;
+                    border-top-right-radius: 6px;
+                    min-width: 80px;
+                    padding: 10px 16px;
+                    margin-right: 2px;
+                    font-weight: 500;
                     font-size: 13px;
-                    margin-right: 4px;
+                    color: #e9ecef;
                 }
                 QTabBar::tab:selected {
-                    background: #7aa2f7;
-                    color: white;
-                    border-color: #7aa2f7;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                                stop: 0 #505050, stop: 1 #404040);
+                    border-color: #4a9eff;
+                    border-bottom-color: #2d2d2d;
+                    color: #4a9eff;
+                    font-weight: 600;
                 }
                 QTabBar::tab:disabled {
-                    background: #181825;
-                    color: #6c7086;
-                    border-color: #313244;
+                    color: #6c757d;
+                    background: #343a40;
+                    border-color: #495057;
                 }
                 QTabBar::tab:hover:!selected {
-                    background: #45475a;
-                    border-color: #585b70;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                                stop: 0 #484848, stop: 1 #3a3a3a);
+                    border-color: #6c757d;
+                    color: #f8f9fa;
                 }
                 QTreeWidget {
                     background: #2a2a3f;
