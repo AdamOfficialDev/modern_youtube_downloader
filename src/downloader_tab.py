@@ -196,9 +196,21 @@ class DownloaderTab:
         return getattr(self.parent, 'formats_list', [])
 
     def setup_ui(self):
-        layout = QVBoxLayout(self.parent.downloader_tab)
-        layout.setSpacing(20)  # Professional spacing between sections
-        layout.setContentsMargins(30, 30, 30, 30)  # Clean margins
+        # Create main layout for the tab
+        main_layout = QVBoxLayout(self.parent.downloader_tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # No margins for scroll area
+        
+        # Create scroll area for content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Create content widget that will be scrollable
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setSpacing(16)  # Optimized spacing between sections
+        layout.setContentsMargins(20, 20, 20, 20)  # Reduced margins for better space usage
 
         # URL Input Section - Professional styling
         url_section = self.create_section("Video URL", is_primary=True)
