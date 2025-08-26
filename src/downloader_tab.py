@@ -317,7 +317,7 @@ class DownloaderTab:
         # MP3 option row
         audio_row = QHBoxLayout()
         audio_spacer = QLabel("")  # Alignment spacer
-        audio_spacer.setMinimumWidth(80)
+        audio_spacer.setMinimumWidth(70)  # Smaller spacer
         
         self.parent.mp3_checkbox = QCheckBox("Extract audio only (MP3)")
         self.parent.mp3_checkbox.setEnabled(False)
@@ -337,16 +337,16 @@ class DownloaderTab:
         output_content = QHBoxLayout()
         
         output_label = QLabel("Folder:")
-        output_label.setMinimumWidth(80)
+        output_label.setMinimumWidth(70)  # Smaller width
         output_label.setStyleSheet("font-weight: 500;")
         
         self.parent.output_path = QLineEdit()
         self.parent.output_path.setText(os.path.join(os.path.expanduser("~"), "Videos", "Downloads"))
-        self.parent.output_path.setMinimumHeight(36)
+        self.parent.output_path.setMinimumHeight(32)  # Smaller height
         
         browse_button = QPushButton("Browse")
-        browse_button.setMinimumHeight(36)
-        browse_button.setMinimumWidth(100)
+        browse_button.setMinimumHeight(32)  # Smaller height
+        browse_button.setMinimumWidth(90)   # Smaller width
         browse_button.clicked.connect(self.browse_output)
         
         output_content.addWidget(output_label)
@@ -359,40 +359,40 @@ class DownloaderTab:
         # Download Controls Section - Professional action area
         controls_section = self.create_section("Download", is_action=True)
         controls_content = QVBoxLayout()
-        controls_content.setSpacing(12)
+        controls_content.setSpacing(8)  # Tighter spacing
         
         # Progress bar - initially hidden
         self.parent.progress_bar = QProgressBar()
-        self.parent.progress_bar.setMinimumHeight(8)
+        self.parent.progress_bar.setMinimumHeight(6)  # Thinner progress bar
         self.parent.progress_bar.hide()
         
         # Status label with professional styling
         self.parent.status_label = QLabel("")
         self.parent.status_label.setStyleSheet("""
             QLabel {
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 500;
                 color: #666;
-                padding: 4px 0px;
+                padding: 2px 0px;
             }
         """)
         
         # Control buttons - professional layout
         button_row = QHBoxLayout()
         self.parent.download_button = QPushButton("Start Download")
-        self.parent.download_button.setMinimumHeight(44)
-        self.parent.download_button.setMinimumWidth(140)
+        self.parent.download_button.setMinimumHeight(38)  # Smaller height
+        self.parent.download_button.setMinimumWidth(130)  # Smaller width
         self.parent.download_button.clicked.connect(self.start_download)
         self.parent.download_button.setStyleSheet("""
             QPushButton {
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 600;
             }
         """)
         
         self.parent.pause_button = QPushButton("Pause")
-        self.parent.pause_button.setMinimumHeight(44)
-        self.parent.pause_button.setMinimumWidth(100)
+        self.parent.pause_button.setMinimumHeight(38)  # Smaller height
+        self.parent.pause_button.setMinimumWidth(90)   # Smaller width
         self.parent.pause_button.clicked.connect(self.toggle_pause)
         self.parent.pause_button.setEnabled(False)
         
