@@ -667,96 +667,10 @@ class ModernVideoDownloader(QMainWindow):
         except Exception as e:
             print(f"Error in on_tab_changed: {str(e)}")
 
-    def apply_professional_tab_style(self):
-        """Apply professional, clean and elegant tab styling"""
-        professional_style = """
-            QTabWidget::pane {
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                margin-top: -1px;
-                background-color: #fafafa;
-            }
-            
-            QTabWidget::pane:dark {
-                border: 1px solid #404040;
-                background-color: #2d2d2d;
-            }
-            
-            QTabBar::tab {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #f8f9fa, stop: 1 #e9ecef);
-                border: 1px solid #d0d0d0;
-                border-bottom-color: transparent;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                min-width: 80px;
-                padding: 10px 16px;
-                margin-right: 2px;
-                font-weight: 500;
-                font-size: 13px;
-                color: #495057;
-            }
-            
-            QTabBar::tab:dark {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #404040, stop: 1 #2d2d2d);
-                border: 1px solid #555555;
-                border-bottom-color: transparent;
-                color: #e9ecef;
-            }
-            
-            QTabBar::tab:selected {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #ffffff, stop: 1 #f8f9fa);
-                border-color: #007bff;
-                border-bottom-color: #fafafa;
-                color: #007bff;
-                font-weight: 600;
-            }
-            
-            QTabBar::tab:selected:dark {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #505050, stop: 1 #404040);
-                border-color: #4a9eff;
-                border-bottom-color: #2d2d2d;
-                color: #4a9eff;
-            }
-            
-            QTabBar::tab:hover:!selected {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #ffffff, stop: 1 #f1f3f4);
-                border-color: #6c757d;
-                color: #343a40;
-            }
-            
-            QTabBar::tab:hover:!selected:dark {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                            stop: 0 #484848, stop: 1 #3a3a3a);
-                border-color: #6c757d;
-                color: #f8f9fa;
-            }
-            
-            QTabBar::tab:disabled {
-                color: #adb5bd;
-                background: #f8f9fa;
-                border-color: #dee2e6;
-            }
-            
-            QTabBar::tab:disabled:dark {
-                color: #6c757d;
-                background: #343a40;
-                border-color: #495057;
-            }
-        """
-        self.tabs.setStyleSheet(professional_style)
-
     def setup_ui(self):
         # Create tab widget
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.on_tab_changed)  # Connect tab change event
-        
-        # Apply professional tab styling
-        self.apply_professional_tab_style()
 
         # Create tabs
         self.downloader_tab = QWidget()
@@ -773,7 +687,7 @@ class ModernVideoDownloader(QMainWindow):
         self.setup_telegram_bot_tab()
         self.setup_settings_tab()
 
-        # Add tabs to widget
+        # Add tabs to widget with cleaner, professional names
         self.tabs.addTab(self.downloader_tab, "Download")
         self.tabs.addTab(self.batch_downloader, "Batch")
         self.tabs.addTab(self.search_tab, "Search")
