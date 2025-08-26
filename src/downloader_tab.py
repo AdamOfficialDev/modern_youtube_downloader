@@ -133,118 +133,278 @@ class DownloaderTab:
 
     def setup_ui(self):
         layout = QVBoxLayout(self.parent.downloader_tab)
+        layout.setSpacing(20)  # Professional spacing between sections
+        layout.setContentsMargins(30, 30, 30, 30)  # Clean margins
 
-        # URL Input Section
-        url_frame = QFrame()
-        url_layout = QHBoxLayout(url_frame)
-
-        url_label = QLabel("Video URL (supports YouTube, Vimeo, Dailymotion, etc.):")
+        # URL Input Section - Professional styling
+        url_section = self.create_section("Video URL", is_primary=True)
+        url_content = QVBoxLayout()
+        
+        # URL input with professional styling
+        url_input_container = QHBoxLayout()
         self.parent.url_input = QLineEdit()
         self.parent.url_input.setPlaceholderText("Enter video URL from any platform...")
+        self.parent.url_input.setMinimumHeight(40)  # Professional height
+        
         paste_button = QPushButton("Paste")
+        paste_button.setMinimumHeight(40)
+        paste_button.setMinimumWidth(80)
         paste_button.clicked.connect(self.paste_url)
+        
+        url_input_container.addWidget(self.parent.url_input)
+        url_input_container.addWidget(paste_button)
+        
+        # Add subtle help text
+        help_text = QLabel("Supports YouTube, Vimeo, Dailymotion, and other platforms")
+        help_text.setStyleSheet("color: #666; font-size: 12px;")
+        
+        url_content.addLayout(url_input_container)
+        url_content.addWidget(help_text)
+        url_section.layout().addLayout(url_content)
+        layout.addWidget(url_section)
 
-        url_layout.addWidget(url_label)
-        url_layout.addWidget(self.parent.url_input)
-        url_layout.addWidget(paste_button)
-
-        layout.addWidget(url_frame)
-
-        # Video Info Section
-        info_frame = QFrame()
-        info_frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        info_layout = QHBoxLayout(info_frame)
-
-        # Left side - Info labels
-        info_labels = QVBoxLayout()
+        # Video Information Section - Clean professional layout
+        info_section = self.create_section("Video Information")
+        info_content = QHBoxLayout()
+        info_content.setSpacing(30)
+        
+        # Left side - Video details with professional typography
+        info_details = QVBoxLayout()
+        info_details.setSpacing(12)
+        
         self.parent.title_label = QLabel("Title: -")
         self.parent.duration_label = QLabel("Duration: -")
         self.parent.channel_label = QLabel("Channel: -")
         self.parent.views_label = QLabel("Views: -")
 
+        # Apply professional styling to info labels
         for label in [self.parent.title_label, self.parent.duration_label,
                      self.parent.channel_label, self.parent.views_label]:
-            info_labels.addWidget(label)
-
-        # Right side - Thumbnail
+            label.setStyleSheet("""
+                QLabel {
+                    font-size: 14px;
+                    font-weight: 500;
+                    padding: 4px 0px;
+                }
+            """)
+            info_details.addWidget(label)
+        
+        info_details.addStretch()
+        
+        # Right side - Thumbnail with professional frame
+        thumbnail_container = QVBoxLayout()
         self.parent.thumbnail_label = QLabel()
-        self.parent.thumbnail_label.setFixedSize(320, 180)
+        self.parent.thumbnail_label.setFixedSize(280, 158)  # 16:9 aspect ratio
         self.parent.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.parent.thumbnail_label.setStyleSheet("""
+            QLabel {
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                background-color: #f8f9fa;
+            }
+        """)
+        thumbnail_container.addWidget(self.parent.thumbnail_label)
+        thumbnail_container.addStretch()
+        
+        info_content.addLayout(info_details, 2)  # 2/3 of space
+        info_content.addLayout(thumbnail_container, 1)  # 1/3 of space
+        info_section.layout().addLayout(info_content)
+        layout.addWidget(info_section)
 
-        info_layout.addLayout(info_labels)
-        info_layout.addWidget(self.parent.thumbnail_label)
-
-        layout.addWidget(info_frame)
-
-        # Format Selection
-        format_frame = QFrame()
-        format_layout = QHBoxLayout(format_frame)
-
-        format_label = QLabel("Format:")
+        # Download Options Section - Professional controls
+        options_section = self.create_section("Download Options")
+        options_content = QVBoxLayout()
+        options_content.setSpacing(16)
+        
+        # Format selection row
+        format_row = QHBoxLayout()
+        format_label = QLabel("Quality:")
+        format_label.setMinimumWidth(80)
+        format_label.setStyleSheet("font-weight: 500;")
+        
         self.parent.format_combo = QComboBox()
         self.parent.format_combo.setMinimumWidth(200)
+        self.parent.format_combo.setMinimumHeight(36)
         self.parent.format_combo.setEnabled(False)
-        self.show_formats_button = QPushButton("Show All Formats")
+        
+        self.show_formats_button = QPushButton("Advanced")
+        self.show_formats_button.setMinimumHeight(36)
+        self.show_formats_button.setMinimumWidth(100)
         self.show_formats_button.clicked.connect(self.show_formats_dialog)
-        self.show_formats_button.setEnabled(False)  # Initially disabled
-
-        # MP3 Conversion Option
-        self.parent.mp3_checkbox = QCheckBox("Convert to MP3")
+        self.show_formats_button.setEnabled(False)
+        
+        format_row.addWidget(format_label)
+        format_row.addWidget(self.parent.format_combo)
+        format_row.addWidget(self.show_formats_button)
+        format_row.addStretch()
+        
+        # MP3 option row
+        audio_row = QHBoxLayout()
+        audio_spacer = QLabel("")  # Alignment spacer
+        audio_spacer.setMinimumWidth(80)
+        
+        self.parent.mp3_checkbox = QCheckBox("Extract audio only (MP3)")
         self.parent.mp3_checkbox.setEnabled(False)
+        self.parent.mp3_checkbox.setStyleSheet("font-weight: 500;")
+        
+        audio_row.addWidget(audio_spacer)
+        audio_row.addWidget(self.parent.mp3_checkbox)
+        audio_row.addStretch()
+        
+        options_content.addLayout(format_row)
+        options_content.addLayout(audio_row)
+        options_section.layout().addLayout(options_content)
+        layout.addWidget(options_section)
 
-        format_layout.addWidget(format_label)
-        format_layout.addWidget(self.parent.format_combo)
-        format_layout.addWidget(self.show_formats_button)
-        format_layout.addWidget(self.parent.mp3_checkbox)
-        format_layout.addStretch()
-
-        layout.addWidget(format_frame)
-
-        # Output Directory
-        output_frame = QFrame()
-        output_layout = QHBoxLayout(output_frame)
-
-        output_label = QLabel("Save to:")
+        # Output Location Section - Clean file selection
+        output_section = self.create_section("Output Location")
+        output_content = QHBoxLayout()
+        
+        output_label = QLabel("Folder:")
+        output_label.setMinimumWidth(80)
+        output_label.setStyleSheet("font-weight: 500;")
+        
         self.parent.output_path = QLineEdit()
-        self.parent.output_path.setText(os.path.join(os.path.expanduser("~"), "Videos\\Captures"))
+        self.parent.output_path.setText(os.path.join(os.path.expanduser("~"), "Videos", "Downloads"))
+        self.parent.output_path.setMinimumHeight(36)
+        
         browse_button = QPushButton("Browse")
+        browse_button.setMinimumHeight(36)
+        browse_button.setMinimumWidth(100)
         browse_button.clicked.connect(self.browse_output)
+        
+        output_content.addWidget(output_label)
+        output_content.addWidget(self.parent.output_path)
+        output_content.addWidget(browse_button)
+        
+        output_section.layout().addLayout(output_content)
+        layout.addWidget(output_section)
 
-        output_layout.addWidget(output_label)
-        output_layout.addWidget(self.parent.output_path)
-        output_layout.addWidget(browse_button)
-
-        layout.addWidget(output_frame)
-
-        # Progress Section
-        progress_frame = QFrame()
-        progress_layout = QVBoxLayout(progress_frame)
-
+        # Download Controls Section - Professional action area
+        controls_section = self.create_section("Download", is_action=True)
+        controls_content = QVBoxLayout()
+        controls_content.setSpacing(12)
+        
+        # Progress bar - initially hidden
         self.parent.progress_bar = QProgressBar()
-        self.parent.progress_bar.hide()  # Sembunyikan progress bar
-
+        self.parent.progress_bar.setMinimumHeight(8)
+        self.parent.progress_bar.hide()
+        
+        # Status label with professional styling
         self.parent.status_label = QLabel("")
-
-        control_layout = QHBoxLayout()
-        self.parent.download_button = QPushButton("Download")
+        self.parent.status_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: 500;
+                color: #666;
+                padding: 4px 0px;
+            }
+        """)
+        
+        # Control buttons - professional layout
+        button_row = QHBoxLayout()
+        self.parent.download_button = QPushButton("Start Download")
+        self.parent.download_button.setMinimumHeight(44)
+        self.parent.download_button.setMinimumWidth(140)
         self.parent.download_button.clicked.connect(self.start_download)
+        self.parent.download_button.setStyleSheet("""
+            QPushButton {
+                font-size: 14px;
+                font-weight: 600;
+            }
+        """)
+        
         self.parent.pause_button = QPushButton("Pause")
+        self.parent.pause_button.setMinimumHeight(44)
+        self.parent.pause_button.setMinimumWidth(100)
         self.parent.pause_button.clicked.connect(self.toggle_pause)
         self.parent.pause_button.setEnabled(False)
-
-        control_layout.addWidget(self.parent.download_button)
-        control_layout.addWidget(self.parent.pause_button)
-        control_layout.addStretch()
-
-        progress_layout.addWidget(self.parent.progress_bar)
-        progress_layout.addWidget(self.parent.status_label)
-        progress_layout.addLayout(control_layout)
-
-        layout.addWidget(progress_frame)
+        
+        button_row.addWidget(self.parent.download_button)
+        button_row.addWidget(self.parent.pause_button)
+        button_row.addStretch()
+        
+        controls_content.addWidget(self.parent.progress_bar)
+        controls_content.addWidget(self.parent.status_label)
+        controls_content.addLayout(button_row)
+        
+        controls_section.layout().addLayout(controls_content)
+        layout.addWidget(controls_section)
+        
         layout.addStretch()
 
         # Connect URL input to video info fetcher
         self.parent.url_input.textChanged.connect(self.on_url_change)
+    
+    def create_section(self, title, is_primary=False, is_action=False):
+        """Create a professional section container"""
+        section = QFrame()
+        section.setFrameStyle(QFrame.Shape.StyledPanel)
+        
+        if is_primary:
+            section.setStyleSheet("""
+                QFrame {
+                    border: 2px solid #007bff;
+                    border-radius: 8px;
+                    background-color: rgba(0, 123, 255, 0.02);
+                    padding: 4px;
+                }
+            """)
+        elif is_action:
+            section.setStyleSheet("""
+                QFrame {
+                    border: 1px solid #28a745;
+                    border-radius: 8px;
+                    background-color: rgba(40, 167, 69, 0.02);
+                    padding: 4px;
+                }
+            """)
+        else:
+            section.setStyleSheet("""
+                QFrame {
+                    border: 1px solid #dee2e6;
+                    border-radius: 8px;
+                    background-color: rgba(248, 249, 250, 0.5);
+                    padding: 4px;
+                }
+            """)
+        
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+        
+        # Section header with professional typography
+        header = QLabel(title)
+        if is_primary:
+            header.setStyleSheet("""
+                QLabel {
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #007bff;
+                    margin-bottom: 6px;
+                }
+            """)
+        elif is_action:
+            header.setStyleSheet("""
+                QLabel {
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #28a745;
+                    margin-bottom: 6px;
+                }
+            """)
+        else:
+            header.setStyleSheet("""
+                QLabel {
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: #495057;
+                    margin-bottom: 6px;
+                }
+            """)
+        
+        layout.addWidget(header)
+        return section
 
     def paste_url(self):
         clipboard = QApplication.clipboard()
