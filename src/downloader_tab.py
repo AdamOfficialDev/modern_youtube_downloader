@@ -407,8 +407,6 @@ class DownloaderTab:
         controls_section.layout().addLayout(controls_content)
         layout.addWidget(controls_section)
         
-        layout.addStretch()
-
         # Set the content widget to the scroll area
         scroll_area.setWidget(content_widget)
         
@@ -419,7 +417,7 @@ class DownloaderTab:
         self.parent.url_input.textChanged.connect(self.on_url_change)
     
     def create_section(self, title, is_primary=False, is_action=False):
-        """Create a professional section container"""
+        """Create a professional section container with optimized spacing"""
         section = QFrame()
         section.setFrameStyle(QFrame.Shape.StyledPanel)
         
@@ -432,8 +430,8 @@ class DownloaderTab:
             section.setProperty("class", "normal")
         
         layout = QVBoxLayout(section)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 12, 16, 12)  # Reduced padding for compact layout
+        layout.setSpacing(8)  # Tighter spacing within sections
         
         # Section header with professional typography
         header = QLabel(title)
@@ -443,12 +441,12 @@ class DownloaderTab:
         elif is_action:
             header.setProperty("class", "action_header")
         
-        # Base styling that works for both themes
+        # Base styling that works for both themes - more compact
         header.setStyleSheet("""
             QLabel {
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 600;
-                margin-bottom: 6px;
+                margin-bottom: 4px;
             }
         """)
         
