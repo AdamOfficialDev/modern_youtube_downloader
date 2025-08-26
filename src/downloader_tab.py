@@ -405,33 +405,13 @@ class DownloaderTab:
         section = QFrame()
         section.setFrameStyle(QFrame.Shape.StyledPanel)
         
+        # Set class property for theming
         if is_primary:
-            section.setStyleSheet("""
-                QFrame {
-                    border: 2px solid #007bff;
-                    border-radius: 8px;
-                    background-color: rgba(0, 123, 255, 0.02);
-                    padding: 4px;
-                }
-            """)
+            section.setProperty("class", "primary")
         elif is_action:
-            section.setStyleSheet("""
-                QFrame {
-                    border: 1px solid #28a745;
-                    border-radius: 8px;
-                    background-color: rgba(40, 167, 69, 0.02);
-                    padding: 4px;
-                }
-            """)
+            section.setProperty("class", "action")
         else:
-            section.setStyleSheet("""
-                QFrame {
-                    border: 1px solid #dee2e6;
-                    border-radius: 8px;
-                    background-color: rgba(248, 249, 250, 0.5);
-                    padding: 4px;
-                }
-            """)
+            section.setProperty("class", "normal")
         
         layout = QVBoxLayout(section)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -439,33 +419,20 @@ class DownloaderTab:
         
         # Section header with professional typography
         header = QLabel(title)
+        header.setProperty("class", "section_header")
         if is_primary:
-            header.setStyleSheet("""
-                QLabel {
-                    font-size: 16px;
-                    font-weight: 600;
-                    color: #007bff;
-                    margin-bottom: 6px;
-                }
-            """)
+            header.setProperty("class", "primary_header")
         elif is_action:
-            header.setStyleSheet("""
-                QLabel {
-                    font-size: 16px;
-                    font-weight: 600;
-                    color: #28a745;
-                    margin-bottom: 6px;
-                }
-            """)
-        else:
-            header.setStyleSheet("""
-                QLabel {
-                    font-size: 15px;
-                    font-weight: 600;
-                    color: #495057;
-                    margin-bottom: 6px;
-                }
-            """)
+            header.setProperty("class", "action_header")
+        
+        # Base styling that works for both themes
+        header.setStyleSheet("""
+            QLabel {
+                font-size: 15px;
+                font-weight: 600;
+                margin-bottom: 6px;
+            }
+        """)
         
         layout.addWidget(header)
         return section
