@@ -126,6 +126,70 @@ class DownloaderTab:
     def __init__(self, parent):
         self.parent = parent
         self.setup_ui()
+        
+    def apply_professional_theme(self, is_dark_mode=False):
+        """Apply professional theme styling to all sections"""
+        if is_dark_mode:
+            # Dark theme styling
+            section_style = """
+                QFrame[class="primary"] {
+                    border: 2px solid #4a9eff;
+                    border-radius: 8px;
+                    background-color: rgba(74, 158, 255, 0.05);
+                }
+                QFrame[class="action"] {
+                    border: 1px solid #40d472;
+                    border-radius: 8px;
+                    background-color: rgba(64, 212, 114, 0.05);
+                }
+                QFrame[class="normal"] {
+                    border: 1px solid #555555;
+                    border-radius: 8px;
+                    background-color: rgba(64, 64, 64, 0.3);
+                }
+                QLabel[class="section_header"] {
+                    color: #e9ecef;
+                    font-weight: 600;
+                }
+                QLabel[class="primary_header"] {
+                    color: #4a9eff;
+                }
+                QLabel[class="action_header"] {
+                    color: #40d472;
+                }
+            """
+        else:
+            # Light theme styling  
+            section_style = """
+                QFrame[class="primary"] {
+                    border: 2px solid #007bff;
+                    border-radius: 8px;
+                    background-color: rgba(0, 123, 255, 0.02);
+                }
+                QFrame[class="action"] {
+                    border: 1px solid #28a745;
+                    border-radius: 8px;
+                    background-color: rgba(40, 167, 69, 0.02);
+                }
+                QFrame[class="normal"] {
+                    border: 1px solid #dee2e6;
+                    border-radius: 8px;
+                    background-color: rgba(248, 249, 250, 0.5);
+                }
+                QLabel[class="section_header"] {
+                    color: #495057;
+                    font-weight: 600;
+                }
+                QLabel[class="primary_header"] {
+                    color: #007bff;
+                }
+                QLabel[class="action_header"] {
+                    color: #28a745;
+                }
+            """
+        
+        # Apply styles to downloader tab
+        self.parent.downloader_tab.setStyleSheet(section_style)
 
     @property
     def formats_list(self):
