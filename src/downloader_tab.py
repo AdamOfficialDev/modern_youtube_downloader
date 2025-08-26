@@ -409,6 +409,12 @@ class DownloaderTab:
         
         layout.addStretch()
 
+        # Set the content widget to the scroll area
+        scroll_area.setWidget(content_widget)
+        
+        # Add the scroll area to the main layout
+        main_layout.addWidget(scroll_area)
+
         # Connect URL input to video info fetcher
         self.parent.url_input.textChanged.connect(self.on_url_change)
     
