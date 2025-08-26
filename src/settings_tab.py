@@ -1143,6 +1143,10 @@ class SettingsTab:
 
         # Apply stylesheet to the main window and all child widgets
         self.parent.setStyleSheet(style)
+        
+        # Apply professional theme to downloader tab
+        if hasattr(self.parent, 'downloader_tab_instance'):
+            self.parent.downloader_tab_instance.apply_professional_theme(state)
 
         # Optimize widget updates - only update visible widgets
         try:
