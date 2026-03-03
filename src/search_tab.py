@@ -1,13 +1,27 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QComboBox, QPushButton, QProgressBar, QScrollArea, QFrame, QCheckBox
+    QComboBox, QPushButton, QProgressBar, QScrollArea, QFrame, QCheckBox, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from datetime import datetime
 import requests
+import re
 from PIL import Image
 from io import BytesIO
+
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[0-9A-Za-z_-]{11}$")
+
+
+def _normalize_youtube_video_id(value):
+    """Return a valid 11-char YouTube video ID string, or None."""
+    if not isinstance(value, str):
+        return None
+    vid = value.strip()
+    if _YOUTUBE_VIDEO_ID_RE.fullmatch(vid):
+        return vid
+    return None
+
 
 class SearchThread(QThread):
     video_found_signal = pyqtSignal(dict)  # Signal untuk setiap video yang ditemukan
@@ -26,10 +40,10 @@ class SearchThread(QThread):
             return None
         item_id = item.get("id")
         if isinstance(item_id, dict):
-            return item_id.get("videoId")
+            return _normalize_youtube_video_id(item_id.get("videoId"))
         # Some responses may use a direct id string (e.g., from videos().list)
         if isinstance(item_id, str):
-            return item_id
+            return _normalize_youtube_video_id(item_id)
         return None
 
     def _extract_thumbnail_url(self, snippet):
@@ -108,6 +122,10 @@ class SearchThread(QThread):
                 if not video_id:
                     # Shouldn't happen because valid_items already filtered, but keep safe.
                     continue
+
+                # Canonical ID + URL so UI tidak perlu membangun ulang
+                item["video_id"] = video_id
+                item["video_url"] = f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Merge video details
                 if video_id in video_details:
@@ -268,11 +286,15 @@ class SearchTab(QWidget):
         """Extract videoId safely from a video item dict."""
         if not isinstance(video_item, dict):
             return None
+        # Prefer canonical id if sudah disimpan
+        canonical = video_item.get("video_id")
+        if isinstance(canonical, str):
+            return _normalize_youtube_video_id(canonical)
         item_id = video_item.get("id")
         if isinstance(item_id, dict):
-            return item_id.get("videoId")
+            return _normalize_youtube_video_id(item_id.get("videoId"))
         if isinstance(item_id, str):
-            return item_id
+            return _normalize_youtube_video_id(item_id)
         return None
 
     def clear_results(self, clear_search_results=True):
@@ -358,6 +380,11 @@ class SearchTab(QWidget):
         if not video_id:
             return None
 
+        video_url = video_item.get("video_url")
+        if not isinstance(video_url, str) or "watch?v=" not in video_url:
+            # Fallback ke URL canonical dari ID
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+
         video_frame = QFrame()
         video_frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
         video_layout = QHBoxLayout(video_frame)
@@ -419,7 +446,8 @@ class SearchTab(QWidget):
         # Download button
         download_btn = QPushButton("Download")
         download_btn.clicked.connect(
-            lambda vid=video_id: self.parent.prepare_download(f"https://www.youtube.com/watch?v={vid}")
+            # clicked(bool) mengirim parameter 'checked', kita abaikan
+            lambda _checked=False, url=video_url: self.parent.prepare_download(url)
         )
         download_btn.setFixedWidth(100)
         video_layout.addWidget(download_btn)
@@ -520,10 +548,13 @@ class SearchTab(QWidget):
             if widget:
                 checkbox = widget.findChild(QCheckBox)
                 if checkbox and checkbox.isChecked():
-                    # Get video ID directly from checkbox property
-                    video_id = checkbox.property("video_id")
-                    if video_id:
-                        url = f"https://www.youtube.com/watch?v={video_id}"
+                    # Get video URL langsung dari data video jika tersedia
+                    frame = widget
+                    video_data = getattr(frame, "video_data", None)
+                    url = None
+                    if isinstance(video_data, dict):
+                        url = video_data.get("video_url")
+                    if isinstance(url, str) and url:
                         selected_videos.append(url)
         
         if selected_videos:
@@ -545,17 +576,19 @@ class SearchTab(QWidget):
             # Join URLs with newlines and set the text
             self.parent.batch_downloader.url_input.setPlainText('\n'.join(unique_urls))
             
-            self.parent.show_styled_message_box(
+            QMessageBox.information(
+                self.parent,
                 "Success",
                 f"Added {len(selected_videos)} videos to batch download list",
-                "info"
+                QMessageBox.StandardButton.Ok
             )
             
             # Switch to batch downloader tab
             self.parent.tabs.setCurrentWidget(self.parent.batch_downloader)
         else:
-            self.parent.show_styled_message_box(
+            QMessageBox.warning(
+                self.parent,
                 "No Selection",
                 "Please select at least one video to add to batch download",
-                "warning"
+                QMessageBox.StandardButton.Ok
             )

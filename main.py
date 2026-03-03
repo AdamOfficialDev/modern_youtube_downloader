@@ -631,6 +631,29 @@ class ModernVideoDownloader(QMainWindow):
         self.api_status_label.setStyleSheet(f"QLabel {{ padding: 5px 10px; color: {color}; font-weight: bold; }}")
 
     def prepare_download(self, url):
+        # Guard against invalid/partial URLs coming from UI interactions
+        if not isinstance(url, str) or not url.strip():
+            QMessageBox.warning(
+                self,
+                "Invalid URL",
+                "Received an empty/invalid URL. Please try another result.",
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
+        # Normalize and validate YouTube video IDs to prevent yt-dlp truncated_id errors
+        m = re.search(r"(?:v=|youtu\.be/|/shorts/)([0-9A-Za-z_-]{11})", url)
+        if not m:
+            QMessageBox.warning(
+                self,
+                "Invalid YouTube Link",
+                f"Could not detect a valid YouTube video ID from:\n{url}",
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
+        url = f"https://www.youtube.com/watch?v={m.group(1)}"
+
         # Set URL in input field
         self.downloader_tab_instance.parent.url_input.setText(url)
         # Switch to Downloader tab (index 0)
