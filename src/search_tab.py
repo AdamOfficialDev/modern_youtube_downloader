@@ -28,10 +28,13 @@ class SearchThread(QThread):
     finished_signal = pyqtSignal(bool, str)  # Signal ketika pencarian selesai
     progress_signal = pyqtSignal(int, int)  # Signal untuk progress (current, total)
     
-    def __init__(self, youtube, query):
+    def __init__(self, youtube, query, page_token=None, start_index_offset=0):
         super().__init__()
         self.youtube = youtube
         self.query = query
+        self.page_token = page_token
+        self.start_index_offset = start_index_offset
+        self.next_page_token = None
         self.last_api_validation = 0
 
     def _extract_video_id(self, item):
@@ -64,16 +67,23 @@ class SearchThread(QThread):
                 self.finished_signal.emit(False, "Search cancelled")
                 return
 
-            # Perform search
-            search_request = self.youtube.search().list(
-                part="snippet",
-                q=self.query,
-                type="video",
-                maxResults=50
-            )
+            # Perform search (single page)
+            search_params = {
+                "part": "snippet",
+                "q": self.query,
+                "type": "video",
+                "maxResults": 50,
+            }
+            if self.page_token:
+                search_params["pageToken"] = self.page_token
+
+            search_request = self.youtube.search().list(**search_params)
             search_response = search_request.execute()
             
-            # Get video IDs for detailed info
+            # Store token untuk page berikutnya (jika ada)
+            self.next_page_token = (search_response or {}).get("nextPageToken")
+
+            # Get video IDs for detailed info (satu page)
             raw_items = (search_response or {}).get("items") or []
             video_ids = []
             valid_items = []
@@ -110,7 +120,7 @@ class SearchThread(QThread):
                     'snippet': item.get('snippet', {}) or {}
                 }
             
-            # Process each video
+            # Process each video (hanya page ini)
             total_videos = len(valid_items)
             
             for index, item in enumerate(valid_items, 1):
@@ -147,8 +157,8 @@ class SearchThread(QThread):
                     print(f"Error loading thumbnail: {e}")
                     item['_thumbnail_data'] = None
                 
-                # Add relevance index
-                item['relevance_index'] = index - 1
+                # Add relevance index (global, pakai offset)
+                item['relevance_index'] = self.start_index_offset + index - 1
                 
                 # Emit the video immediately
                 self.video_found_signal.emit(item)
@@ -170,6 +180,9 @@ class SearchTab(QWidget):
         self.sort_ascending = False
         self.search_results = []
         self.video_widgets = []
+        self.current_query = ""
+        self.next_page_token = None
+        self.is_loading_more = False
         
         # Initialize search timer for debouncing
         self.search_timer = QTimer()
@@ -233,6 +246,8 @@ class SearchTab(QWidget):
         self.results_layout.addStretch(1)
         
         self.results_scroll.setWidget(self.results_widget)
+        # Infinite scroll: load more ketika hampir di bawah
+        self.results_scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
         layout.addWidget(self.results_scroll)
         
         # Progress bar and status
@@ -266,7 +281,12 @@ class SearchTab(QWidget):
         query = self.search_input.text().strip()
         if not query:
             return
-            
+
+        # Reset state untuk pencarian baru
+        self.current_query = query
+        self.next_page_token = None
+        self.is_loading_more = False
+
         # Clear previous results first
         self.clear_results()
         
@@ -275,12 +295,47 @@ class SearchTab(QWidget):
         self.search_progress.setValue(0)
         self.update_search_status("Searching for videos...")
         
-        # Start new search thread
-        self.search_thread = SearchThread(self.parent.youtube, query)
+        # Start new search thread (page pertama)
+        self.search_thread = SearchThread(self.parent.youtube, query, page_token=None, start_index_offset=0)
         self.search_thread.video_found_signal.connect(self.add_video)
         self.search_thread.progress_signal.connect(self.update_search_progress)
         self.search_thread.finished_signal.connect(self.on_search_finished)
         self.search_thread.start()
+
+    def _load_more_results(self):
+        """Load next page of results for infinite scroll."""
+        if self.is_loading_more:
+            return
+        if not self.current_query or not self.next_page_token:
+            return
+        if self.search_thread and self.search_thread.isRunning():
+            return
+
+        self.is_loading_more = True
+        offset = len(self.search_results)
+
+        self.search_progress.setVisible(True)
+        self.update_search_status("Loading more videos...")
+
+        self.search_thread = SearchThread(
+            self.parent.youtube,
+            self.current_query,
+            page_token=self.next_page_token,
+            start_index_offset=offset,
+        )
+        self.search_thread.video_found_signal.connect(self.add_video)
+        self.search_thread.progress_signal.connect(self.update_search_progress)
+        self.search_thread.finished_signal.connect(self.on_search_finished)
+        self.search_thread.start()
+
+    def _on_scroll(self, value):
+        """Handler ketika user scroll; trigger load more saat mendekati bawah."""
+        sb = self.results_scroll.verticalScrollBar()
+        if sb.maximum() <= 0:
+            return
+        # Jika posisi scroll sudah melewati 80% dari maksimum, coba load more
+        if value >= sb.maximum() * 0.8:
+            self._load_more_results()
 
     def _extract_video_id(self, video_item):
         """Extract videoId safely from a video item dict."""
@@ -372,6 +427,12 @@ class SearchTab(QWidget):
     def on_search_finished(self, success, message):
         if self.sender() is not self.search_thread:
             return
+
+        # Simpan token page berikutnya bila ada
+        thread = self.search_thread
+        self.next_page_token = getattr(thread, "next_page_token", None)
+        self.is_loading_more = False
+
         self.update_search_status(message, not success)
         self.search_progress.setVisible(False)
 
