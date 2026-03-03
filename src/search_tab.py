@@ -19,9 +19,37 @@ class SearchThread(QThread):
         self.youtube = youtube
         self.query = query
         self.last_api_validation = 0
+
+    def _extract_video_id(self, item):
+        """Extract videoId safely from a YouTube search API item."""
+        if not isinstance(item, dict):
+            return None
+        item_id = item.get("id")
+        if isinstance(item_id, dict):
+            return item_id.get("videoId")
+        # Some responses may use a direct id string (e.g., from videos().list)
+        if isinstance(item_id, str):
+            return item_id
+        return None
+
+    def _extract_thumbnail_url(self, snippet):
+        if not isinstance(snippet, dict):
+            return None
+        thumbs = snippet.get("thumbnails") or {}
+        if not isinstance(thumbs, dict):
+            return None
+        for key in ("medium", "default", "high", "standard", "maxres"):
+            obj = thumbs.get(key)
+            if isinstance(obj, dict) and obj.get("url"):
+                return obj["url"]
+        return None
         
     def run(self):
         try:
+            if self.isInterruptionRequested():
+                self.finished_signal.emit(False, "Search cancelled")
+                return
+
             # Perform search
             search_request = self.youtube.search().list(
                 part="snippet",
@@ -32,7 +60,23 @@ class SearchThread(QThread):
             search_response = search_request.execute()
             
             # Get video IDs for detailed info
-            video_ids = [item['id']['videoId'] for item in search_response['items']]
+            raw_items = (search_response or {}).get("items") or []
+            video_ids = []
+            valid_items = []
+            for it in raw_items:
+                vid = self._extract_video_id(it)
+                if not vid:
+                    continue
+                video_ids.append(vid)
+                valid_items.append(it)
+
+            if self.isInterruptionRequested():
+                self.finished_signal.emit(False, "Search cancelled")
+                return
+
+            if not video_ids:
+                self.finished_signal.emit(True, "No videos found")
+                return
             
             # Get detailed video information including statistics
             videos_request = self.youtube.videos().list(
@@ -43,17 +87,27 @@ class SearchThread(QThread):
             
             # Create a mapping of video details
             video_details = {}
-            for item in videos_response['items']:
-                video_details[item['id']] = {
-                    'statistics': item['statistics'],
-                    'snippet': item['snippet']
+            for item in (videos_response or {}).get("items") or []:
+                vid = self._extract_video_id(item)
+                if not vid:
+                    continue
+                video_details[vid] = {
+                    'statistics': item.get('statistics', {}) or {},
+                    'snippet': item.get('snippet', {}) or {}
                 }
             
             # Process each video
-            total_videos = len(search_response['items'])
+            total_videos = len(valid_items)
             
-            for index, item in enumerate(search_response['items'], 1):
-                video_id = item['id']['videoId']
+            for index, item in enumerate(valid_items, 1):
+                if self.isInterruptionRequested():
+                    self.finished_signal.emit(False, "Search cancelled")
+                    return
+
+                video_id = self._extract_video_id(item)
+                if not video_id:
+                    # Shouldn't happen because valid_items already filtered, but keep safe.
+                    continue
                 
                 # Merge video details
                 if video_id in video_details:
@@ -63,12 +117,14 @@ class SearchThread(QThread):
                 
                 # Pre-download thumbnail
                 try:
-                    thumbnail_url = item['snippet']['thumbnails']['default']['url']
-                    response = requests.get(thumbnail_url)
-                    img = Image.open(BytesIO(response.content))
-                    img = img.resize((120, 90), Image.Resampling.LANCZOS)
-                    img_data = img.tobytes("raw", "RGB")
-                    item['_thumbnail_data'] = img_data
+                    thumbnail_url = self._extract_thumbnail_url(item.get("snippet") or {})
+                    if thumbnail_url:
+                        response = requests.get(thumbnail_url, timeout=8)
+                        img = Image.open(BytesIO(response.content)).convert("RGB")
+                        img = img.resize((120, 90), Image.Resampling.LANCZOS)
+                        item['_thumbnail_data'] = img.tobytes("raw", "RGB")
+                    else:
+                        item['_thumbnail_data'] = None
                 except Exception as e:
                     print(f"Error loading thumbnail: {e}")
                     item['_thumbnail_data'] = None
@@ -156,6 +212,7 @@ class SearchTab(QWidget):
         self.results_widget = QWidget()
         self.results_layout = QVBoxLayout(self.results_widget)
         self.results_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.results_layout.addStretch(1)
         
         self.results_scroll.setWidget(self.results_widget)
         layout.addWidget(self.results_scroll)
@@ -169,10 +226,10 @@ class SearchTab(QWidget):
         layout.addWidget(self.status_label)
         
     def _debounce_search(self):
-        # Cancel any ongoing search
+        # Cancel any ongoing search (cooperative cancellation)
         if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.terminate()
-            self.search_thread.wait()
+            self.search_thread.requestInterruption()
+            self.search_thread.wait(300)
             
         # Reset and start the timer
         self.search_timer.stop()
@@ -185,8 +242,8 @@ class SearchTab(QWidget):
         
     def perform_search(self):
         if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.terminate()
-            self.search_thread.wait()
+            self.search_thread.requestInterruption()
+            self.search_thread.wait(500)
         
         query = self.search_input.text().strip()
         if not query:
@@ -206,6 +263,17 @@ class SearchTab(QWidget):
         self.search_thread.progress_signal.connect(self.update_search_progress)
         self.search_thread.finished_signal.connect(self.on_search_finished)
         self.search_thread.start()
+
+    def _extract_video_id(self, video_item):
+        """Extract videoId safely from a video item dict."""
+        if not isinstance(video_item, dict):
+            return None
+        item_id = video_item.get("id")
+        if isinstance(item_id, dict):
+            return item_id.get("videoId")
+        if isinstance(item_id, str):
+            return item_id
+        return None
 
     def clear_results(self, clear_search_results=True):
         """Clear all search results
@@ -229,6 +297,8 @@ class SearchTab(QWidget):
         
     def update_search_progress(self, current, total):
         """Update the search progress bar"""
+        if self.sender() is not self.search_thread:
+            return
         self.search_progress.setVisible(True)
         self.search_progress.setMaximum(total)
         self.search_progress.setValue(current)
@@ -251,11 +321,22 @@ class SearchTab(QWidget):
         self.sort_results()
         
     def add_video(self, video_item):
+        # Ignore results from older threads
+        if self.sender() is not self.search_thread:
+            return
+
+        video_id = self._extract_video_id(video_item)
+        if not video_id:
+            # Sometimes the API can yield unexpected items; skip safely.
+            return
+
         # Add to search results
         self.search_results.append(video_item)
         
         # Create and add widget
         video_widget = self.create_video_widget(video_item)
+        if not video_widget:
+            return
         # Insert before the stretch item
         self.results_layout.insertWidget(
             self.results_layout.count() - 1, 
@@ -267,17 +348,22 @@ class SearchTab(QWidget):
         self.update_search_status(f"Found {len(self.search_results)} videos...")
 
     def on_search_finished(self, success, message):
+        if self.sender() is not self.search_thread:
+            return
         self.update_search_status(message, not success)
         self.search_progress.setVisible(False)
 
     def create_video_widget(self, video_item):
+        video_id = self._extract_video_id(video_item)
+        if not video_id:
+            return None
+
         video_frame = QFrame()
         video_frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
         video_layout = QHBoxLayout(video_frame)
         
         # Add checkbox
         checkbox = QCheckBox()
-        video_id = video_item['id']['videoId']
         checkbox.setObjectName(f"checkbox_{video_id}")
         checkbox.setProperty("video_id", video_id)
         # Connect checkbox state change to update selected count
@@ -333,7 +419,8 @@ class SearchTab(QWidget):
         # Download button
         download_btn = QPushButton("Download")
         download_btn.clicked.connect(
-            lambda: self.parent.prepare_download(f"https://www.youtube.com/watch?v={video_item['id']['videoId']}"))
+            lambda vid=video_id: self.parent.prepare_download(f"https://www.youtube.com/watch?v={vid}")
+        )
         download_btn.setFixedWidth(100)
         video_layout.addWidget(download_btn)
         
@@ -404,9 +491,13 @@ class SearchTab(QWidget):
             
             # Recreate widgets in sorted order
             for video_item in self.search_results:
-                video_id = video_item['id']['videoId']
+                video_id = self._extract_video_id(video_item)
+                if not video_id:
+                    continue
                 if video_id not in added_videos:
                     video_widget = self.create_video_widget(video_item)
+                    if not video_widget:
+                        continue
                     # Apply theme style
                     self.parent.update_video_widget_style(video_widget)
                     self.results_layout.insertWidget(
