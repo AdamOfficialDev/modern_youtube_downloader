@@ -1,5 +1,19 @@
 import sys
 import os
+
+# ============================================================
+# FIX: Dynamic base path untuk EXE maupun development
+# ============================================================
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+BASE_PATH = get_base_path()
+os.chdir(BASE_PATH)  # Pastikan working directory benar
+# ============================================================
+
 import json
 import threading
 import yt_dlp
@@ -48,17 +62,11 @@ class ExportThread(QThread):
     def run(self):
         try:
             import csv
-
-            # Define columns
             columns = ['Title', 'Channel', 'Download Date', 'Format', 'Duration',
                       'Views', 'Output Directory', 'Status']
-
-            # Write to CSV
             with open(self.file_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(columns)  # Write header
-
-                # Write data rows
+                writer.writerow(columns)
                 for item in self.history_data:
                     writer.writerow([
                         item.get('title', ''),
@@ -70,7 +78,6 @@ class ExportThread(QThread):
                         item.get('output_dir', ''),
                         item.get('status', 'Completed')
                     ])
-
             self.finished_signal.emit(True, "History exported successfully!")
         except Exception as e:
             self.finished_signal.emit(False, f"Failed to export history: {str(e)}")
@@ -82,30 +89,24 @@ class AboutDialog(QDialog):
         self.setFixedSize(600, 400)
 
         layout = QVBoxLayout()
-
-        # Create a scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content_widget = QWidget()
         scroll.setWidget(content_widget)
         content_layout = QVBoxLayout(content_widget)
 
-        # App Logo and Title
         title_label = QLabel("Modern Multi-Platform Video Downloader")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #2196F3; margin: 10px;")
 
-        # Version
         version_label = QLabel("Version 1.0.0")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet("font-size: 16px; color: #666;")
 
-        # Developer Info
         dev_label = QLabel("Developed by Adam Official Dev")
         dev_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dev_label.setStyleSheet("font-size: 16px; margin: 10px;")
 
-        # Description
         desc_text = """
         Modern Video Downloader is a powerful and user-friendly application designed to download videos from YouTube and other platforms. Built with Python and PyQt6, it offers a modern and intuitive interface for all your video downloading needs.
 
@@ -132,7 +133,6 @@ class AboutDialog(QDialog):
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("font-size: 14px; line-height: 1.5; margin: 20px;")
 
-        # Links
         links_label = QLabel("""
         <a href="https://github.com/AdamOfficialDev/modern_youtube_downloader">GitHub Repository</a> |
         <a href="https://github.com/AdamOfficialDev">Developer Profile</a>
@@ -141,7 +141,6 @@ class AboutDialog(QDialog):
         links_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         links_label.setStyleSheet("margin: 20px;")
 
-        # Add widgets to layout
         content_layout.addWidget(title_label)
         content_layout.addWidget(version_label)
         content_layout.addWidget(dev_label)
@@ -149,10 +148,8 @@ class AboutDialog(QDialog):
         content_layout.addWidget(links_label)
         content_layout.addStretch()
 
-        # Add scroll area to main layout
         layout.addWidget(scroll)
 
-        # Close button
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
         close_button.setStyleSheet("""
@@ -178,69 +175,49 @@ class ModernVideoDownloader(QMainWindow):
         self.setWindowTitle("Adam | Modern Multi-Platform Video Downloader")
         self.setMinimumSize(1000, 700)
 
-        # Initialize config first
         self.config = self.load_config()
-
-        # Check and setup FFmpeg
         self.setup_ffmpeg()
 
-        # Initialize other variables
         self.download_history = self.load_history()
         self.is_downloading = False
         self.is_paused = False
         self.formats_list = []
         self.download_thread = None
-        self.is_dark_mode = True  # Track current theme
+        self.is_dark_mode = True
 
-        # Initialize YouTube API variables
-        self.youtube = None  # Initialize youtube attribute
-        self.current_api_key = None  # Track current API key
-        self.api_key_valid = False  # Track API key validity
-        self.api_status_label = None  # Initialize status label
+        self.youtube = None
+        self.current_api_key = None
+        self.api_key_valid = False
+        self.api_status_label = None
 
-        # Setup UI
         self.setup_ui()
 
-        # Add About action
         self.about_action = self.menuBar().addMenu("Help").addAction("About")
         self.about_action.triggered.connect(self.show_about_dialog)
 
-        # Now that UI is setup, initialize API and set initial tab
         self.youtube = self.setup_youtube_api(show_error=False)
-        if self.youtube:  # If API key is valid
-            # Enable tabs and show downloader tab
+        if self.youtube:
             self.update_tab_states(True)
-            self.tabs.setCurrentIndex(0)  # Show downloader tab
+            self.tabs.setCurrentIndex(0)
         else:
-            # Disable tabs and show settings tab
             self.update_tab_states(False)
-            # Settings tab should already be active from setup_ui()
-            # But ensure it's set correctly
-            self.tabs.setCurrentIndex(5)  # Settings tab
-
-            # Verification to ensure correct tab
+            self.tabs.setCurrentIndex(5)
             QTimer.singleShot(100, lambda: self._ensure_settings_tab_active())
 
-        # Apply style after tab is set
         self.settings_widget.apply_style()
 
     def _ensure_settings_tab_active(self):
-        """Ensure Settings tab is active when API key is invalid"""
         try:
             current_index = self.tabs.currentIndex()
             current_tab_name = self.tabs.tabText(current_index)
-
             if current_tab_name != "Settings":
-                # Force switch to Settings tab
-                settings_index = 5  # Settings is at index 5
-                self.tabs.setCurrentIndex(settings_index)
+                self.tabs.setCurrentIndex(5)
                 self.tabs.setCurrentWidget(self.settings_tab)
         except Exception as e:
             print(f"Error ensuring Settings tab active: {e}")
 
     def changeEvent(self, event):
         if event.type() == event.Type.PaletteChange:
-            # Check if theme actually changed
             is_now_dark = self.palette().color(QPalette.ColorRole.Window).lightness() <= 128
             if is_now_dark != self.is_dark_mode:
                 self.is_dark_mode = is_now_dark
@@ -251,13 +228,11 @@ class ModernVideoDownloader(QMainWindow):
         for widget in self.search_tab_instance.video_widgets:
             if widget and not widget.isHidden():
                 self.update_video_widget_style(widget)
-                widget.update()  # Force widget to repaint
+                widget.update()
 
     def update_video_widget_style(self, frame):
         is_light_mode = not self.is_dark_mode
-
         if is_light_mode:
-            # Light mode
             style = """
                 QFrame {
                     background-color: #f0f0f0;
@@ -270,7 +245,6 @@ class ModernVideoDownloader(QMainWindow):
             title_style = "QLabel { color: #000000; font-weight: bold; }"
             channel_style = "QLabel { color: #666666; }"
         else:
-            # Dark mode
             style = """
                 QFrame {
                     background-color: #2d2d2d;
@@ -284,15 +258,11 @@ class ModernVideoDownloader(QMainWindow):
             channel_style = "QLabel { color: #aaa; }"
 
         frame.setStyleSheet(style)
-
-        # Update label colors
         for child in frame.findChildren(QLabel):
             if child.property("type") == "title":
                 child.setStyleSheet(title_style)
             elif child.property("type") == "channel":
                 child.setStyleSheet(channel_style)
-
-        # Force frame to update
         frame.style().unpolish(frame)
         frame.style().polish(frame)
         frame.update()
@@ -309,7 +279,7 @@ class ModernVideoDownloader(QMainWindow):
         self.history_widget = HistoryWidget(self)
         layout = QVBoxLayout(self.history_tab)
         layout.addWidget(self.history_widget)
-        self.history_widget.set_download_history(self.download_history, update_display_only=True)  # Set initial history
+        self.history_widget.set_download_history(self.download_history, update_display_only=True)
 
     def setup_telegram_bot_tab(self):
         self.telegram_bot_widget = TelegramBotTab(self)
@@ -319,10 +289,10 @@ class ModernVideoDownloader(QMainWindow):
 
     def load_history(self):
         try:
-            if os.path.exists('download_history.json'):
-                with open('download_history.json', 'r') as f:
+            history_path = os.path.join(BASE_PATH, 'download_history.json')
+            if os.path.exists(history_path):
+                with open(history_path, 'r') as f:
                     history = json.load(f)
-                    # Ensure all items have required fields
                     for item in history:
                         if 'date' not in item:
                             item['date'] = 'N/A'
@@ -335,13 +305,11 @@ class ModernVideoDownloader(QMainWindow):
 
     def load_config(self):
         """Load configuration from config.json"""
-        # Use config.json in root directory (same as other components)
-        config_path = 'config.json'
+        config_path = os.path.join(BASE_PATH, 'config.json')
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    # Ensure required fields exist
                     if "ffmpeg_path" not in config:
                         config["ffmpeg_path"] = None
                     if "youtube_api_key" not in config:
@@ -353,18 +321,14 @@ class ModernVideoDownloader(QMainWindow):
                     return config
             except Exception as e:
                 print(f"Error loading config: {e}")
-                return {"ffmpeg_path": None, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": []}
         return {"ffmpeg_path": None, "youtube_api_key": "", "telegram_bot_token": "", "admin_users": []}
 
     def save_config(self):
         """Save configuration to config.json"""
-        # Use config.json in root directory (same as other components)
-        config_path = 'config.json'
+        config_path = os.path.join(BASE_PATH, 'config.json')
 
-        # If ffmpeg_path is being set to null, remove the ffmpeg directory
         if self.config.get('ffmpeg_path') is None:
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            ffmpeg_dir = os.path.join(app_dir, 'ffmpeg')
+            ffmpeg_dir = os.path.join(BASE_PATH, 'ffmpeg')
             if os.path.exists(ffmpeg_dir):
                 try:
                     shutil.rmtree(ffmpeg_dir)
@@ -382,9 +346,7 @@ class ModernVideoDownloader(QMainWindow):
 
     def add_to_history(self):
         try:
-            # Get the URL from the input field
             url = self.url_input.text().strip()
-
             history_entry = {
                 'title': self.title_label.text().replace("Title: ", ""),
                 'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -404,7 +366,6 @@ class ModernVideoDownloader(QMainWindow):
             print(f"Error adding to history: {str(e)}")
 
     def add_batch_download_to_history(self, title, format_id, output_dir, url="N/A"):
-        """Add a batch download to history"""
         try:
             history_entry = {
                 'title': title,
@@ -432,30 +393,26 @@ class ModernVideoDownloader(QMainWindow):
 
     def update_progress(self, data):
         try:
-            # Get values from data
             downloaded = data.get('downloaded_bytes', 0)
             total = data.get('total_bytes', 0)
             speed = data.get('speed', 0)
             percent = data.get('percent', 0)
             eta = data.get('eta', 0)
 
-            # Update progress bar
             self.progress_bar.setValue(int(percent))
-
-            # Format sizes and create status message
             status = f"{data.get('status', '')} "
 
-            if total > 0:  # Only show sizes if we have valid total
+            if total > 0:
                 downloaded_mb = downloaded / (1024 * 1024)
                 total_mb = total / (1024 * 1024)
                 status += f"{downloaded_mb:.1f}MB of {total_mb:.1f}MB "
                 status += f"({percent:.1f}%) "
 
-            if speed > 0:  # Only show speed if we have valid speed
+            if speed > 0:
                 speed_mb = speed / (1024 * 1024)
                 status += f"at {speed_mb:.1f}MB/s "
 
-            if eta and eta > 0:  # Only show ETA if we have valid eta
+            if eta and eta > 0:
                 minutes = int(eta // 60)
                 seconds = int(eta % 60)
                 status += f"- {minutes}:{seconds:02d} remaining"
@@ -473,13 +430,11 @@ class ModernVideoDownloader(QMainWindow):
 
     def save_history(self):
         try:
-            # Save history to file
-            with open('download_history.json', 'w') as f:
+            history_path = os.path.join(BASE_PATH, 'download_history.json')
+            with open(history_path, 'w') as f:
                 json.dump(self.download_history, f, indent=4)
 
-            # Update history widget if it exists
             if hasattr(self, 'history_widget'):
-                # Only update display without triggering another save operation
                 self.history_widget.set_download_history(self.download_history, update_display_only=True)
 
             print(f"History saved successfully. Items: {len(self.download_history)}")
@@ -512,205 +467,134 @@ class ModernVideoDownloader(QMainWindow):
 
     def setup_youtube_api(self, show_error=False):
         try:
-            # Load API key from config
-            if not os.path.exists('config.json'):
+            config_path = os.path.join(BASE_PATH, 'config.json')
+            if not os.path.exists(config_path):
                 if show_error:
-                    QMessageBox.warning(
-                        self,
-                        "Error",
-                        "Please set your YouTube API key in Settings",
-                        QMessageBox.StandardButton.Ok
-                    )
+                    QMessageBox.warning(self, "Error", "Please set your YouTube API key in Settings", QMessageBox.StandardButton.Ok)
                 if hasattr(self, 'api_status_label') and self.api_status_label:
                     self.update_api_status_label("Not Connected", is_error=True)
                 return None
 
-            with open('config.json', 'r') as f:
+            with open(config_path, 'r') as f:
                 config = json.load(f)
                 api_key = config.get('youtube_api_key')
 
             if not api_key:
                 if show_error:
-                    QMessageBox.warning(
-                        self,
-                        "Error",
-                        "Please set your YouTube API key in Settings",
-                        QMessageBox.StandardButton.Ok
-                    )
+                    QMessageBox.warning(self, "Error", "Please set your YouTube API key in Settings", QMessageBox.StandardButton.Ok)
                 if hasattr(self, 'api_status_label') and self.api_status_label:
                     self.update_api_status_label("Not Connected", is_error=True)
                 return None
 
-            # Initialize the YouTube API
             youtube = build('youtube', 'v3', developerKey=api_key)
-
-            # Test the API with a simple request
-            request = youtube.channels().list(
-                part="snippet",
-                id="UC_x5XG1OV2P6uZZ5FSM9Ttw"  # Google Developers channel
-            )
+            request = youtube.channels().list(part="snippet", id="UC_x5XG1OV2P6uZZ5FSM9Ttw")
             request.execute()
 
-            # If we get here, the API is working
             if hasattr(self, 'api_status_label') and self.api_status_label:
                 self.update_api_status_label("Connected", is_error=False)
             return youtube
 
         except HttpError as e:
             if show_error:
-                QMessageBox.critical(
-                    self,
-                    "Error",
-                    "Invalid API key or API quota exceeded",
-                    QMessageBox.StandardButton.Ok
-                )
+                QMessageBox.critical(self, "Error", "Invalid API key or API quota exceeded", QMessageBox.StandardButton.Ok)
             if hasattr(self, 'api_status_label') and self.api_status_label:
                 self.update_api_status_label("Invalid API Key", is_error=True)
             return None
 
         except (FileNotFoundError, KeyError):
             if show_error:
-                QMessageBox.warning(
-                    self,
-                    "Error",
-                    "Please set your YouTube API key in Settings",
-                    QMessageBox.StandardButton.Ok
-                )
+                QMessageBox.warning(self, "Error", "Please set your YouTube API key in Settings", QMessageBox.StandardButton.Ok)
             if hasattr(self, 'api_status_label') and self.api_status_label:
                 self.update_api_status_label("Not Connected", is_error=True)
             return None
 
         except Exception as e:
             if show_error:
-                QMessageBox.critical(
-                    self,
-                    "Error",
-                    f"Failed to initialize YouTube API: {str(e)}",
-                    QMessageBox.StandardButton.Ok
-                )
+                QMessageBox.critical(self, "Error", f"Failed to initialize YouTube API: {str(e)}", QMessageBox.StandardButton.Ok)
             if hasattr(self, 'api_status_label') and self.api_status_label:
                 self.update_api_status_label("Error", is_error=True)
             return None
 
     def update_tab_states(self, api_valid=False):
-        # Get tab indices
         downloader_index = self.tabs.indexOf(self.downloader_tab)
         batch_index = self.tabs.indexOf(self.batch_downloader)
         search_index = self.tabs.indexOf(self.search_tab)
 
-        # Enable/disable tabs based on API status
         self.tabs.setTabEnabled(downloader_index, api_valid)
         self.tabs.setTabEnabled(batch_index, api_valid)
         self.tabs.setTabEnabled(search_index, api_valid)
 
-        # Update tooltips based on API status
         tooltip = "⚠️ This tab requires a valid YouTube API key.\nPlease go to Settings tab and enter a valid API key." if not api_valid else ""
         self.tabs.setTabToolTip(downloader_index, tooltip)
         self.tabs.setTabToolTip(batch_index, tooltip)
         self.tabs.setTabToolTip(search_index, tooltip)
 
-        # If current tab is disabled, switch to settings tab
         if not api_valid and self.tabs.currentIndex() in [downloader_index, batch_index, search_index]:
-            settings_index = 5  # Settings is at index 5
-            self.tabs.setCurrentIndex(settings_index)
-            print(f"Switched to Settings tab due to invalid API (index {settings_index})")
+            self.tabs.setCurrentIndex(5)
 
     def update_api_status_label(self, status, is_error=True):
-        # Only update if label exists
         if not hasattr(self, 'api_status_label') or self.api_status_label is None:
             return
-
         if is_error:
-            color = "#ff4444"  # Red for error
-            self.update_tab_states(False)  # Disable tabs on error
+            color = "#ff4444"
+            self.update_tab_states(False)
         else:
-            color = "#44aa44"  # Green for success
-            self.update_tab_states(True)  # Enable tabs on success
-
+            color = "#44aa44"
+            self.update_tab_states(True)
         self.api_status_label.setText(f"API Status: {status}")
         self.api_status_label.setStyleSheet(f"QLabel {{ padding: 5px 10px; color: {color}; font-weight: bold; }}")
 
     def prepare_download(self, url):
-        # Guard against invalid/partial URLs coming from UI interactions
         if not isinstance(url, str) or not url.strip():
-            QMessageBox.warning(
-                self,
-                "Invalid URL",
-                "Received an empty/invalid URL. Please try another result.",
-                QMessageBox.StandardButton.Ok
-            )
+            QMessageBox.warning(self, "Invalid URL", "Received an empty/invalid URL. Please try another result.", QMessageBox.StandardButton.Ok)
             return
 
-        # Normalize and validate YouTube video IDs to prevent yt-dlp truncated_id errors
         m = re.search(r"(?:v=|youtu\.be/|/shorts/)([0-9A-Za-z_-]{11})", url)
         if not m:
-            QMessageBox.warning(
-                self,
-                "Invalid YouTube Link",
-                f"Could not detect a valid YouTube video ID from:\n{url}",
-                QMessageBox.StandardButton.Ok
-            )
+            QMessageBox.warning(self, "Invalid YouTube Link", f"Could not detect a valid YouTube video ID from:\n{url}", QMessageBox.StandardButton.Ok)
             return
 
         url = f"https://www.youtube.com/watch?v={m.group(1)}"
-
-        # Set URL in input field
         self.downloader_tab_instance.parent.url_input.setText(url)
-        # Switch to Downloader tab (index 0)
         self.tabs.setCurrentIndex(0)
-        # Update status label
         self.downloader_tab_instance.parent.status_label.setText("Fetching video information...")
         self.downloader_tab_instance.parent.status_label.setStyleSheet("QLabel { color: #1a73e8; }")
         self.downloader_tab_instance.parent.status_label.repaint()
-        # Fetch video info
         threading.Thread(target=self.downloader_tab_instance.fetch_video_info, daemon=True).start()
 
     def on_tab_changed(self, index):
         try:
             tab_name = self.tabs.tabText(index)
-
-            # Reinitialize YouTube API when switching to search tab
             if tab_name == "Search":
                 if not hasattr(self, 'youtube') or self.youtube is None:
-                    # Use threading to avoid blocking UI
                     import threading
                     def init_api():
                         self.youtube = self.setup_youtube_api(show_error=False)
-
                     api_thread = threading.Thread(target=init_api, daemon=True)
                     api_thread.start()
-
-            # Reload API key when switching to settings tab (optimized)
             elif tab_name == "Settings":
                 if hasattr(self, 'settings_widget') and self.settings_widget:
-                    # Use QTimer to defer the reload to avoid blocking tab switch
                     QTimer.singleShot(50, lambda: self.settings_widget.reload_api_key())
-                    print("Scheduled API key reload for Settings tab")
-
         except Exception as e:
             print(f"Error in on_tab_changed: {str(e)}")
 
     def setup_ui(self):
-        # Create tab widget
         self.tabs = QTabWidget()
-        self.tabs.currentChanged.connect(self.on_tab_changed)  # Connect tab change event
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
-        # Create tabs
         self.downloader_tab = QWidget()
         self.search_tab = QWidget()
         self.history_tab = QWidget()
         self.telegram_bot_tab = QWidget()
         self.settings_tab = QWidget()
-        self.batch_downloader = BatchDownloadWidget(self)  # Initialize batch downloader with parent reference
+        self.batch_downloader = BatchDownloadWidget(self)
 
-        # Setup individual tabs
         self.setup_downloader_tab()
         self.setup_search_tab()
         self.setup_history_tab()
         self.setup_telegram_bot_tab()
         self.setup_settings_tab()
 
-        # Add tabs to widget with cleaner, professional names
         self.tabs.addTab(self.downloader_tab, "Download")
         self.tabs.addTab(self.batch_downloader, "Batch")
         self.tabs.addTab(self.search_tab, "Search")
@@ -718,16 +602,11 @@ class ModernVideoDownloader(QMainWindow):
         self.tabs.addTab(self.telegram_bot_tab, "Bot")
         self.tabs.addTab(self.settings_tab, "Settings")
 
-        # IMPORTANT: Set default tab to Settings immediately after adding tabs
-        # This prevents any other code from setting a different default
-        self.tabs.setCurrentIndex(5)  # Settings tab
-
-        # Set the central widget
+        self.tabs.setCurrentIndex(5)
         self.setCentralWidget(self.tabs)
 
     def on_palette_changed(self, palette):
         try:
-            # Update all video widgets if they exist
             if hasattr(self, 'search_tab_instance') and self.search_tab_instance.video_widgets:
                 for widget in self.search_tab_instance.video_widgets:
                     self.update_video_widget_style(widget)
@@ -735,32 +614,24 @@ class ModernVideoDownloader(QMainWindow):
             print(f"Error updating widget styles: {str(e)}")
 
     def closeEvent(self, event):
-        """Handle application close event"""
-        # Check if download is in progress
         if self.is_downloading:
             msg = "A download is in progress. Are you sure you want to exit?"
         else:
             msg = "Are you sure you want to exit?"
 
         reply = QMessageBox.question(
-            self,
-            'Confirm Exit',
-            msg,
+            self, 'Confirm Exit', msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            # Save any pending changes or cleanup if needed
             if self.is_downloading and self.download_thread:
                 self.download_thread.terminate()
                 self.download_thread.wait()
-
-            # Stop Telegram bot if running
             if hasattr(self.settings_widget, 'bot_manager') and self.settings_widget.bot_manager:
                 if self.settings_widget.bot_manager.is_bot_running():
                     self.settings_widget.bot_manager.stop_bot()
-
             event.accept()
         else:
             event.ignore()
@@ -771,25 +642,20 @@ class ModernVideoDownloader(QMainWindow):
             return True
 
         try:
-            # Create and show progress dialog
             progress = QDialog(self)
             progress.setWindowTitle("FFmpeg Setup")
             progress.setWindowModality(Qt.WindowModality.ApplicationModal)
             progress.setFixedSize(400, 150)
 
             layout = QVBoxLayout()
-
-            # Add status label
             status_label = QLabel("Initializing FFmpeg...", progress)
             status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(status_label)
 
-            # Add progress bar
             progress_bar = QProgressBar(progress)
             progress_bar.setTextVisible(False)
             layout.addWidget(progress_bar)
 
-            # Add detail label
             detail_label = QLabel("", progress)
             detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             detail_label.setWordWrap(True)
@@ -798,48 +664,39 @@ class ModernVideoDownloader(QMainWindow):
             progress.setLayout(layout)
             progress.show()
 
-            # Update status
             status_label.setText("Checking FFmpeg bundle...")
             QApplication.processEvents()
 
-            # Get the application directory
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            ffmpeg_bundle_path = os.path.join(app_dir, 'bundled', 'ffmpeg.zip')
-
-            # Create directory for FFmpeg if it doesn't exist
-            ffmpeg_dir = os.path.join(app_dir, 'ffmpeg')
+            # ============================================================
+            # FIX: Gunakan BASE_PATH untuk mencari bundled ffmpeg
+            # ============================================================
+            ffmpeg_bundle_path = os.path.join(BASE_PATH, 'bundled', 'ffmpeg.zip')
+            ffmpeg_dir = os.path.join(BASE_PATH, 'ffmpeg')
             os.makedirs(ffmpeg_dir, exist_ok=True)
 
-            # Extract bundled FFmpeg
             if os.path.exists(ffmpeg_bundle_path):
                 status_label.setText("Extracting FFmpeg...")
                 detail_label.setText("This may take a few moments...")
-                progress_bar.setRange(0, 0)  # Indeterminate progress
+                progress_bar.setRange(0, 0)
                 QApplication.processEvents()
 
                 with zipfile.ZipFile(ffmpeg_bundle_path, 'r') as zip_ref:
-                    # Get total files for progress
                     total_files = len(zip_ref.namelist())
                     progress_bar.setRange(0, total_files)
-
-                    # Extract with progress
                     for i, member in enumerate(zip_ref.namelist(), 1):
                         zip_ref.extract(member, ffmpeg_dir)
                         progress_bar.setValue(i)
                         detail_label.setText(f"Extracting: {os.path.basename(member)}")
                         QApplication.processEvents()
 
-                # Find the bin directory (it might be nested in a subfolder)
                 status_label.setText("Configuring FFmpeg...")
                 detail_label.setText("Looking for FFmpeg executable...")
                 QApplication.processEvents()
 
-                # Look for ffmpeg.exe in the expected location first
                 expected_bin_dir = os.path.join(ffmpeg_dir, 'ffmpeg-master-latest-win64-gpl', 'bin')
                 if os.path.exists(os.path.join(expected_bin_dir, 'ffmpeg.exe')):
                     ffmpeg_bin_dir = expected_bin_dir
                 else:
-                    # Fallback to searching in all subdirectories
                     ffmpeg_bin_dir = None
                     for root, dirs, files in os.walk(ffmpeg_dir):
                         if 'ffmpeg.exe' in files:
@@ -847,109 +704,100 @@ class ModernVideoDownloader(QMainWindow):
                             break
 
                 if ffmpeg_bin_dir:
-                    # Add to current session PATH only
                     current_path = os.environ.get('PATH', '')
                     if ffmpeg_bin_dir not in current_path:
                         os.environ['PATH'] = ffmpeg_bin_dir + os.pathsep + current_path
 
-                    # Store FFmpeg path for direct use
                     self.ffmpeg_path = os.path.join(ffmpeg_bin_dir, 'ffmpeg.exe')
-
-                    # Save the path to config using the new method
                     self.set_ffmpeg_config(self.ffmpeg_path)
+                    self.ydl_opts = {'ffmpeg_location': self.ffmpeg_path}
 
-                    # Configure yt-dlp to use our FFmpeg
-                    self.ydl_opts = {
-                        'ffmpeg_location': self.ffmpeg_path,
-                    }
-
-                    # Close progress dialog
                     progress.close()
-
-                    # Show success message
-                    QMessageBox.information(
-                        self,
-                        "FFmpeg Setup Complete",
-                        "FFmpeg has been successfully set up and is ready to use!"
-                    )
-
+                    QMessageBox.information(self, "FFmpeg Setup Complete", "FFmpeg has been successfully set up and is ready to use!")
                     return True
                 else:
                     progress.close()
-                    QMessageBox.critical(
-                        self,
-                        "FFmpeg Setup Error",
-                        "Could not find ffmpeg.exe in the extracted files."
-                    )
+                    QMessageBox.critical(self, "FFmpeg Setup Error", "Could not find ffmpeg.exe in the extracted files.")
                     return False
             else:
                 progress.close()
                 QMessageBox.critical(
-                    self,
-                    "FFmpeg Setup Error",
-                    "FFmpeg bundle not found in the application directory. "
-                    "Please make sure the application is properly installed."
+                    self, "FFmpeg Setup Error",
+                    "FFmpeg not found.\n\nPlease copy ffmpeg.exe and ffprobe.exe into the 'ffmpeg' folder next to this application."
                 )
                 return False
 
         except Exception as e:
             if 'progress' in locals():
                 progress.close()
-            QMessageBox.critical(
-                self,
-                "FFmpeg Setup Error",
-                f"Error setting up FFmpeg: {str(e)}"
-            )
+            QMessageBox.critical(self, "FFmpeg Setup Error", f"Error setting up FFmpeg: {str(e)}")
             return False
 
     def is_ffmpeg_installed(self):
-        """Check if FFmpeg is available in the system or our bundled version."""
-        # First check if we have a saved valid path
+        """Check if FFmpeg is available - with proper path resolution for EXE."""
+
+        # ============================================================
+        # FIX: Cek ffmpeg di folder yang sama dengan EXE (BASE_PATH)
+        # ============================================================
+
+        # 1. Cek ffmpeg langsung di folder BASE_PATH/ffmpeg/
+        local_ffmpeg = os.path.join(BASE_PATH, 'ffmpeg', 'ffmpeg.exe')
+        if os.path.exists(local_ffmpeg):
+            try:
+                result = subprocess.run([local_ffmpeg, '-version'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    # Update config dengan path yang benar
+                    self.set_ffmpeg_config(local_ffmpeg)
+                    os.environ['PATH'] = os.path.dirname(local_ffmpeg) + os.pathsep + os.environ.get('PATH', '')
+                    print(f"[FFmpeg] Found at: {local_ffmpeg}")
+                    return True
+            except Exception as e:
+                print(f"[FFmpeg] Error checking local ffmpeg: {e}")
+
+        # 2. Cek path yang tersimpan di config (validasi ulang)
         if self.config.get('ffmpeg_path'):
             ffmpeg_path = self.config['ffmpeg_path']
             if os.path.exists(ffmpeg_path):
                 try:
-                    result = subprocess.run([ffmpeg_path, '-version'],
-                                         capture_output=True, text=True)
+                    result = subprocess.run([ffmpeg_path, '-version'], capture_output=True, text=True)
                     if result.returncode == 0:
-                        # Set the path in environment
                         os.environ['PATH'] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get('PATH', '')
+                        print(f"[FFmpeg] Found at config path: {ffmpeg_path}")
                         return True
                 except:
                     pass
+            else:
+                # Path di config tidak valid (path dari komputer lain), reset
+                print(f"[FFmpeg] Config path invalid (from another PC): {ffmpeg_path}")
+                self.config['ffmpeg_path'] = None
 
-        try:
-            # Check system PATH
-            result = subprocess.run(['ffmpeg', '-version'],
-                                 capture_output=True, text=True)
-            return result.returncode == 0
-        except FileNotFoundError:
-            # Then check our bundled version
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            ffmpeg_dir = os.path.join(app_dir, 'ffmpeg')
-
-            # Check directly in the ffmpeg directory first (where download_ffmpeg.py places it)
-            direct_bin = os.path.join(ffmpeg_dir, 'ffmpeg.exe')
-            if os.path.exists(direct_bin):
-                # Found it, update config and return True
-                self.set_ffmpeg_config(direct_bin)
-                return True
-
-            # Check in expected location next
-            expected_bin = os.path.join(ffmpeg_dir, 'ffmpeg-master-latest-win64-gpl', 'bin', 'ffmpeg.exe')
-            if os.path.exists(expected_bin):
-                # Found it, update config and return True
-                self.set_ffmpeg_config(expected_bin)
-                return True
-
-            # Fallback to searching all subdirectories
+        # 3. Cek subfolder di BASE_PATH/ffmpeg/ (hasil ekstrak zip)
+        ffmpeg_dir = os.path.join(BASE_PATH, 'ffmpeg')
+        if os.path.exists(ffmpeg_dir):
             for root, dirs, files in os.walk(ffmpeg_dir):
                 if 'ffmpeg.exe' in files:
-                    # Found it, update config and return True
                     ffmpeg_path = os.path.join(root, 'ffmpeg.exe')
-                    self.set_ffmpeg_config(ffmpeg_path)
-                    return True
-            return False
+                    try:
+                        result = subprocess.run([ffmpeg_path, '-version'], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            self.set_ffmpeg_config(ffmpeg_path)
+                            os.environ['PATH'] = root + os.pathsep + os.environ.get('PATH', '')
+                            print(f"[FFmpeg] Found in subdirectory: {ffmpeg_path}")
+                            return True
+                    except:
+                        pass
+
+        # 4. Cek sistem PATH
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+            if result.returncode == 0:
+                print("[FFmpeg] Found in system PATH")
+                return True
+        except FileNotFoundError:
+            pass
+
+        print("[FFmpeg] Not found anywhere")
+        return False
 
     def show_about_dialog(self):
         dialog = AboutDialog(self)
