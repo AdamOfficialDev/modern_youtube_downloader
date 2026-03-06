@@ -7,18 +7,27 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-active-success)
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Activation](https://img.shields.io/badge/activation-required-red)
 
 </div>
 
 <div align="center">
   <h3>Powerful YouTube Video Downloader with Modern GUI</h3>
   <p>Download videos, music, and playlists from YouTube with ease!</p>
+  <p>
+    <a href="#-license-activation">🔑 License Activation</a> ·
+    <a href="#-features">✨ Features</a> ·
+    <a href="#-installation">📥 Installation</a> ·
+    <a href="#-usage-guide">🎮 Usage Guide</a> ·
+    <a href="https://github.com/AdamOfficialDev/modern-youtube-downloder-code-activation#readme">🌐 License Server Docs</a>
+  </p>
 </div>
 
 ---
 
 ## 📋 Table of Contents
 
+- [License Activation](#-license-activation)
 - [Features](#-features)
 - [Installation](#-installation)
 - [Usage Guide](#-usage-guide)
@@ -28,6 +37,45 @@
 - [FAQ](#-faq)
 - [License](#-license)
 - [Contact](#-contact)
+
+---
+
+## 🔑 License Activation
+
+> ⚠️ **This application requires a valid license key to run.**  
+> A license key is bound to **1 device** and is verified online at startup.
+
+### How to Activate
+
+1. Run the application — an **activation dialog** will appear automatically
+2. Enter your license key (format: `XXXX-XXXX-XXXX-XXXX`)
+3. Click **"Activate"**
+4. If successful, the app will open immediately ✅
+
+### License Plans
+
+| Plan | Duration | Description |
+|---|---|---|
+| 🟡 **Trial** | 7 days | Try before you buy |
+| 🔵 **Basic** | 30 days | Personal use |
+| 🟣 **Pro** | 90 days | Full features |
+| 🟢 **Enterprise** | 1 year | Power users |
+| 🔴 **Lifetime** | Forever | One-time purchase |
+
+### Offline Grace Period
+
+The app continues to run for up to **72 hours** without an internet connection.  
+After 72 hours, an online check is required to re-verify your license.
+
+### Switching / Reinstalling PC?
+
+Contact the developer to reset your machine binding — your old key will be revoked and a new one issued.  
+See [Contact →](#-contact)
+
+> 📌 **For admins / developers:** Full documentation on managing license keys, the admin dashboard, and deploying the license server is available at:  
+> 👉 **[github.com/AdamOfficialDev/modern-youtube-downloder-code-activation](https://github.com/AdamOfficialDev/modern-youtube-downloder-code-activation#readme)**
+
+---
 
 ## ✨ Features
 
@@ -81,11 +129,13 @@
   - Thumbnail embedding
   - Chapter markers
 
+---
+
 ## 📥 Installation
 
 ### Prerequisites
 
-- Python 3.12(recommended)
+- Python 3.12 (recommended)
 - Windows 7/8/10/11
 - Internet connection
 - 500MB free space
@@ -112,6 +162,9 @@
      run.bat
      ```
 
+   > On first launch, a **license activation dialog** will appear automatically.  
+   > Enter your license key to continue. [How to activate →](#-license-activation)
+
 ### Manual Installation
 
 1. **Install Dependencies**
@@ -125,6 +178,8 @@
    - Download FFmpeg
    - Rename to `ffmpeg.zip`
    - Place in `bundled` folder
+
+---
 
 ## 🎮 Usage Guide
 
@@ -158,6 +213,8 @@
 - Filter by date/status
 - Clear history
 
+---
+
 ## ⚙️ Configuration
 
 ### General Settings
@@ -180,6 +237,8 @@
 - Result filters
 - Display options
 - Cache settings
+
+---
 
 ## 🔧 Troubleshooting
 
@@ -205,32 +264,54 @@
    - Check resources
    - Limit concurrent downloads
 
+### License Issues
+
+| Error Message | Solution |
+|---|---|
+| "License key not found" | Double-check the key, contact developer if correct |
+| "Already activated on another device" | Contact developer to reset machine binding |
+| "License expired" | Renew your license — contact developer |
+| "Cannot connect to server" | Check your internet connection and try again |
+| "License revoked" | Contact developer for assistance |
+
+---
+
 ## 💻 Development
 
 ### Project Structure
 
 ```
 modern_youtube_downloader/
-├── bundled/              # FFmpeg folder
-│   └── ffmpeg.zip       # FFmpeg binary
-├── main.py              # Main application entry point
-├── download_ffmpeg.py   # FFmpeg downloader script
-├── setup.bat            # Setup script
-├── run.bat             # Run script
-├── Requirements.txt    # Python dependencies
-├── .gitignore         # Git ignore file
-└── README.md          # Documentation
+├── bundled/                  # FFmpeg folder
+│   └── ffmpeg.zip            # FFmpeg binary
+├── main.py                   # Main application entry point
+├── download_ffmpeg.py        # FFmpeg downloader script
+├── setup.bat                 # Setup script
+├── run.bat                   # Run script
+├── Requirements.txt          # Python dependencies
+├── .gitignore                # Git ignore file
+│
+├── src/
+│   ├── license_manager.py    # License validation & server connection
+│   └── license_dialog.py     # Activation dialog UI
+│
+└── README.md                 # This document
 ```
+
+> 📌 License server source code and full deployment guide:  
+> 👉 **[github.com/AdamOfficialDev/modern-youtube-downloder-code-activation](https://github.com/AdamOfficialDev/modern-youtube-downloder-code-activation#readme)**
 
 ### Key Components
 
-- **Main Application**: `main.py` - Core application with PyQt6 UI
-- **Setup Scripts**: 
-  - `setup.bat` - Automated installation
-  - `download_ffmpeg.py` - FFmpeg downloader
-- **Dependencies**: 
-  - `Requirements.txt` - Python packages
-  - `bundled/ffmpeg.zip` - FFmpeg binary
+- **Main Application**: `main.py` — Core application with PyQt6 UI
+- **License Manager**: `src/license_manager.py` — Handles online validation, caching, and revoke detection
+- **License Dialog**: `src/license_dialog.py` — Activation UI shown on first launch
+- **Setup Scripts**:
+  - `setup.bat` — Automated installation
+  - `download_ffmpeg.py` — FFmpeg downloader
+- **Dependencies**:
+  - `Requirements.txt` — Python packages
+  - `bundled/ffmpeg.zip` — FFmpeg binary
 
 ### Contributing
 
@@ -239,13 +320,15 @@ modern_youtube_downloader/
 3. Implement changes
 4. Submit pull request
 
+---
+
 ## ❓ FAQ
 
 ### General Questions
 
 1. **Is it free?**
 
-   - Yes, completely free & open source
+   - The source code is open source (MIT), but running the app requires a purchased license key.
 
 2. **Supported platforms?**
 
@@ -255,6 +338,20 @@ modern_youtube_downloader/
 3. **Update frequency?**
    - Monthly feature updates
    - Weekly bug fixes
+
+### License Questions
+
+1. **Can I use one key on multiple PCs?**
+
+   - No — each key is bound to one device. Contact the developer for multi-seat options.
+
+2. **What happens if I'm offline?**
+
+   - The app continues working for up to 72 hours without internet.
+
+3. **Can I transfer my license to a new PC?**
+
+   - Yes — contact the developer to reset your machine binding.
 
 ### Technical Questions
 
@@ -267,9 +364,14 @@ modern_youtube_downloader/
    - Based on connection
    - Multiple threads supported
 
+---
+
 ## 📄 License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) file.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) file.  
+Usage of this application requires a valid commercial license key purchased from the developer.
+
+---
 
 ## 📞 Contact
 
@@ -291,4 +393,6 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) file.
   Made with ❤️ by Adam Official Dev
   <br>
   &copy; 2024 Modern YouTube Downloader
+  <br><br>
+  <a href="https://github.com/AdamOfficialDev/modern-youtube-downloder-code-activation#readme">🌐 License Server Documentation →</a>
 </div>
