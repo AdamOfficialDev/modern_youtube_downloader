@@ -2,15 +2,16 @@
 License Manager — Modern Video Downloader
 =========================================
 Sistem validasi lisensi ONLINE via server Railway.
-- Aktivasi: kirim kode + machine_id ke server → simpan cache .license
-- Verifikasi startup: ping server untuk cek status terbaru
-- Preview dialog: fetch info kode dari server sebelum aktivasi
+Semua validasi dilakukan 100% di server — tidak ada secret di client.
+
+- Preview  : GET  /api/preview  → info kode dari DB (tanpa aktivasi)
+- Aktivasi : POST /api/activate → binding kode ke machine_id
+- Verifikasi: POST /api/verify  → cek status tiap startup
 
 Format kode: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  (25 chars + 4 dashes)
 """
 
 import hashlib
-import hmac
 import json
 import os
 import platform
@@ -25,9 +26,10 @@ SERVER_URL = os.environ.get(
     "LICENSE_SERVER_URL",
     "https://web-production-0375c.up.railway.app"
 )
-REQUEST_TIMEOUT = 10   # detik — untuk activate & verify (startup)
-PREVIEW_TIMEOUT =  5   # detik — untuk fetch info dialog (bisa sedikit lebih lama)
+REQUEST_TIMEOUT = 10   # detik — activate & verify
+PREVIEW_TIMEOUT =  5   # detik — preview dialog
 
+# Semua info plan diambil dari server — dict ini hanya untuk UI badge statis
 PLANS = {
     'T': {'name': 'Trial',      'days': 7,    'label': '7 Hari',      'color': '#f5a623'},
     'B': {'name': 'Basic',      'days': 30,   'label': '1 Bulan',     'color': '#4a9eff'},
@@ -35,14 +37,6 @@ PLANS = {
     'E': {'name': 'Enterprise', 'days': 365,  'label': '1 Tahun',     'color': '#2ecc71'},
     'L': {'name': 'Lifetime',   'days': None, 'label': 'Selamanya ∞', 'color': '#e74c3c'},
 }
-
-# Harus sama persis dengan LICENSE_SECRET di server Railway
-_LOCAL_SECRET = os.environ.get("LICENSE_SECRET", "ganti_dengan_output_dari_perintah_diatas")
-
-
-def _sign(payload: str) -> str:
-    h = hmac.new(_LOCAL_SECRET.encode(), payload.encode('utf-8'), hashlib.sha256)
-    return h.hexdigest()[:8].upper()
 
 
 def get_machine_id() -> str:
@@ -77,6 +71,18 @@ class LicenseManager:
     def get_active_code(self) -> str | None:
         cache = self._load_cache()
         return cache.get("code") if cache else None
+
+    def check_internet(self) -> bool:
+        """
+        Cek koneksi ke server Railway.
+        Dipakai dialog untuk tampilkan status internet real-time.
+        Timeout pendek (3s) agar tidak blocking UI.
+        """
+        try:
+            requests.get(f"{SERVER_URL}/health", timeout=3)
+            return True
+        except Exception:
+            return False
 
     def _save_cache(self, data: dict):
         data['cached_at'] = datetime.now().isoformat()
@@ -163,6 +169,15 @@ class LicenseManager:
         lifetime  = data.get("lifetime", False)
         expires   = data.get("expires_at")
 
+        # Double-check: jika expires_at sudah lewat, paksa status jadi expired
+        # (safety net jika server lama tidak return status expired dengan benar)
+        if expires and not lifetime:
+            try:
+                if datetime.now() > datetime.fromisoformat(expires):
+                    status = "expired"
+            except Exception:
+                pass
+
         base = {"ok": True, "found": True, "plan_name": plan_name,
                 "label": label, "status": status,
                 "expires_at": expires, "lifetime": lifetime}
@@ -173,7 +188,7 @@ class LicenseManager:
 
         if status == "expired":
             return {**base, "valid": False,
-                    "msg": f"Kode sudah kadaluarsa — Paket {plan_name}"}
+                    "msg": f"Kode sudah kadaluarsa — tidak bisa digunakan lagi"}
 
         if status == "inactive":
             msg = f"Paket {plan_name} ({label}) · Siap diaktivasi"
@@ -226,6 +241,15 @@ class LicenseManager:
     # ── Verify (startup) ──────────────────────────────────────────────────────
 
     def is_activated(self) -> bool:
+        """
+        Cek validitas lisensi.
+
+        Urutan:
+        1. expires_at di cache sudah lewat? → BLOK (data ini ditulis server sendiri saat aktivasi)
+        2. Hit server /api/verify → server PostgreSQL yang memutuskan
+        3. Server bilang tidak valid (reason apapun) → BLOK
+        4. Offline → grace period 72 jam
+        """
         cache = self._load_cache()
         if not cache:
             return False
@@ -235,39 +259,66 @@ class LicenseManager:
         if not code:
             return False
 
-        was_revoked = cache.get("revoked", False)
+        # ── STEP 1: Cek expires_at dari cache ─────────────────────────────────
+        # expires_at ini ditulis oleh SERVER saat aktivasi/verify — bukan kalkulasi lokal.
+        # Jika sudah lewat, tidak perlu tanya server — pasti expired.
+        expires_at_str = cache.get("expires_at")
+        lifetime       = cache.get("lifetime", False)
+        if expires_at_str and not lifetime:
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str)
+                if datetime.now() > expires_at:
+                    print(f"[LicenseManager] BLOCKED — expires_at from cache: {expires_at_str}")
+                    self._save_cache({**cache,
+                                      "expired": True,
+                                      "invalid_reason": "expired",
+                                      "invalid_at": datetime.now().isoformat()})
+                    return False
+            except Exception:
+                pass
 
+        # ── STEP 2: Hit server ────────────────────────────────────────────────
         try:
             resp = requests.post(
                 f"{SERVER_URL}/api/verify",
                 json={"code": code, "machine_id": self._machine_id},
                 timeout=REQUEST_TIMEOUT
             )
-            data = resp.json()
+            data   = resp.json()
+            reason = data.get("reason", "unknown")
+
             if data.get("valid"):
+                # Server konfirmasi valid — update cache dengan data terbaru
                 self._save_cache({
                     **cache,
-                    "plan":       data.get("plan",       cache.get("plan", "")),
-                    "label":      data.get("label",      cache.get("label", "")),
-                    "expires_at": data.get("expires_at", cache.get("expires_at")),
-                    "lifetime":   data.get("lifetime",   cache.get("lifetime", False)),
-                    "machine_id": self._machine_id,
-                    "revoked":    False,
+                    "plan":           data.get("plan",       cache.get("plan", "")),
+                    "label":          data.get("label",      cache.get("label", "")),
+                    "expires_at":     data.get("expires_at", cache.get("expires_at")),
+                    "lifetime":       data.get("lifetime",   cache.get("lifetime", False)),
+                    "machine_id":     self._machine_id,
+                    "invalid_reason": None,
+                    "expired":        False,
+                    "revoked":        False,
                 })
                 return True
-            else:
-                self._save_cache({**cache, "revoked": True,
-                                  "revoked_at": datetime.now().isoformat()})
-                return False
+
+            # Server bilang tidak valid — reason apapun → BLOK
+            print(f"[LicenseManager] BLOCKED by server — reason: {reason}, msg: {data.get('message')}")
+            self._save_cache({
+                **cache,
+                "expired":        reason == "expired",
+                "revoked":        reason == "revoked",
+                "invalid_reason": reason,
+                "invalid_at":     datetime.now().isoformat(),
+            })
+            return False
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            if was_revoked:
-                return False
+            print(f"[LicenseManager] offline — grace period fallback")
             return self._cache_still_valid(cache)
+
         except Exception as e:
             print(f"[LicenseManager] verify error: {e}")
-            if was_revoked:
-                return False
             return self._cache_still_valid(cache)
 
     # ── Info helpers ──────────────────────────────────────────────────────────

@@ -20,10 +20,7 @@ from src.license_manager import LicenseManager, PLANS
 
 # ── Background worker untuk fetch info kode (Qt-safe) ────────────────────────
 class _PreviewWorker(QThread):
-    """
-    Fetch info kode di background thread.
-    Emit signal `done` dengan dict result ke main thread — Qt-safe.
-    """
+    """Fetch info kode di background — emit signal ke main thread."""
     done = pyqtSignal(dict)
 
     def __init__(self, mgr: LicenseManager, code: str):
@@ -34,6 +31,19 @@ class _PreviewWorker(QThread):
     def run(self):
         result = self._mgr.fetch_code_info(self._code)
         self.done.emit(result)
+
+
+class _InternetChecker(QThread):
+    """Cek koneksi internet ke server — emit True/False ke main thread."""
+    result = pyqtSignal(bool)
+
+    def __init__(self, mgr: LicenseManager):
+        super().__init__()
+        self._mgr = mgr
+
+    def run(self):
+        ok = self._mgr.check_internet()
+        self.result.emit(ok)
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -56,6 +66,13 @@ class _P:
         'T': "#f5a623", 'B': "#4a9eff",
         'P': "#9b59b6", 'E': "#2ecc71", 'L': "#e74c3c",
     }
+    # Internet status banner
+    NET_ONLINE_BG   = "rgba(62, 207, 142, 0.10)"
+    NET_ONLINE_BD   = "rgba(62, 207, 142, 0.30)"
+    NET_OFFLINE_BG  = "rgba(245, 101, 101, 0.10)"
+    NET_OFFLINE_BD  = "rgba(245, 101, 101, 0.30)"
+    NET_CHECKING_BG = "rgba(82, 90, 122, 0.20)"
+    NET_CHECKING_BD = "rgba(82, 90, 122, 0.40)"
 
 
 # ── Auto-formatting code input ────────────────────────────────────────────────
@@ -191,15 +208,23 @@ class LicenseDialog(QDialog):
         self._mgr               = license_manager
         self._reactivation_mode = reactivation_mode
         self._preview_seq       = 0
-        self._worker            = None   # referensi ke QThread aktif
+        self._worker            = None   # _PreviewWorker aktif
+        self._inet_checker      = None   # _InternetChecker aktif
+        self._is_online         = None   # None = belum tahu, True/False = hasil cek
+        self._last_preview      = None   # result terakhir dari preview — untuk blok aktivasi
 
         # Debounce timer — tunggu 400ms setelah kode lengkap
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.timeout.connect(self._run_preview)
 
+        # Periodic internet check — setiap 8 detik
+        self._inet_timer = QTimer(self)
+        self._inet_timer.setInterval(8000)
+        self._inet_timer.timeout.connect(self._check_internet)
+
         self.setWindowTitle("Aktivasi Lisensi — Modern Video Downloader")
-        self.setFixedSize(580, 640)
+        self.setFixedSize(580, 680)
         self.setWindowFlags(
             Qt.WindowType.Dialog |
             Qt.WindowType.WindowTitleHint |
@@ -208,6 +233,10 @@ class LicenseDialog(QDialog):
         self.setStyleSheet(f"QDialog {{ background-color: {_P.BG_DEEP}; }}")
 
         self._build_ui()
+
+        # Cek internet saat dialog buka
+        self._check_internet()
+        self._inet_timer.start()
 
     # ── UI Builder ────────────────────────────────────────────────────────────
 
@@ -223,10 +252,14 @@ class LicenseDialog(QDialog):
         card = QWidget()
         card.setStyleSheet(f"background-color: {_P.BG_DEEP};")
         card_lay = QVBoxLayout(card)
-        card_lay.setContentsMargins(40, 30, 40, 30)
-        card_lay.setSpacing(20)
+        card_lay.setContentsMargins(40, 24, 40, 24)
+        card_lay.setSpacing(16)
 
-        # ── Code input section
+        # ── Internet status banner ─────────────────────────────────────────────
+        self._inet_banner = self._build_inet_banner()
+        card_lay.addWidget(self._inet_banner)
+
+        # ── Code input section ────────────────────────────────────────────────
         input_label_text = (
             "Masukkan Kode Lisensi Baru" if self._reactivation_mode
             else "Masukkan Kode Lisensi Anda"
@@ -290,13 +323,66 @@ class LicenseDialog(QDialog):
                                      weight="700", color=_P.TXT_SEC))
         card_lay.addWidget(self._build_plans_grid())
 
-        # Spacer
         card_lay.addStretch()
 
         # ── Contact footer
         card_lay.addWidget(self._build_footer())
 
         root.addWidget(card)
+
+    def _build_inet_banner(self) -> QWidget:
+        """Banner status koneksi internet — update via _set_inet_status()."""
+        w = QFrame()
+        w.setFixedHeight(38)
+        w.setObjectName("inet_banner")
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(14, 0, 14, 0)
+        lay.setSpacing(8)
+
+        self._inet_dot = QLabel("●")
+        self._inet_dot.setStyleSheet(
+            f"font-size: 10px; color: {_P.TXT_MUTED}; background: transparent; border: none;"
+        )
+        self._inet_txt = QLabel("Memeriksa koneksi...")
+        self._inet_txt.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {_P.TXT_MUTED}; "
+            f"background: transparent; border: none;"
+        )
+
+        self._inet_retry_btn = QPushButton("↻ Coba Lagi")
+        self._inet_retry_btn.setFixedSize(80, 24)
+        self._inet_retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._inet_retry_btn.setVisible(False)
+        self._inet_retry_btn.clicked.connect(self._check_internet)
+        self._inet_retry_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {_P.ACCENT};
+                border: 1px solid {_P.ACCENT};
+                border-radius: 5px;
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{ background: {_P.ACCENT_DIM}; }}
+        """)
+
+        lay.addWidget(self._inet_dot)
+        lay.addWidget(self._inet_txt)
+        lay.addStretch()
+        lay.addWidget(self._inet_retry_btn)
+
+        # Default: checking style
+        self._apply_banner_style(w, _P.NET_CHECKING_BG, _P.NET_CHECKING_BD)
+        return w
+
+    def _apply_banner_style(self, widget: QFrame, bg: str, border: str):
+        widget.setStyleSheet(f"""
+            QFrame#inet_banner {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+            }}
+        """)
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -424,12 +510,73 @@ class LicenseDialog(QDialog):
             f"color: {color}; font-size: 13px; font-weight: 600; background: transparent;"
         )
 
+    # ── Internet status ───────────────────────────────────────────────────────
+
+    def _check_internet(self):
+        """Launch background thread cek koneksi ke server."""
+        # Set ke 'checking' dulu kecuali sudah online (jangan flicker)
+        if self._is_online is not True:
+            self._set_inet_status("checking")
+
+        if self._inet_checker and self._inet_checker.isRunning():
+            return   # sudah ada cek yang sedang jalan
+
+        self._inet_checker = _InternetChecker(self._mgr)
+        self._inet_checker.result.connect(self._on_inet_result)
+        self._inet_checker.start()
+
+    def _on_inet_result(self, online: bool):
+        self._is_online = online
+        self._set_inet_status("online" if online else "offline")
+        # Jika baru online dan ada kode terisi → auto-fetch info
+        if online and self._code_input.is_complete():
+            self._on_code_complete()
+
+    def _set_inet_status(self, state: str):
+        """Update banner sesuai state: 'checking' | 'online' | 'offline'."""
+        if state == "online":
+            self._inet_dot.setStyleSheet(
+                f"font-size: 10px; color: {_P.GREEN}; background: transparent; border: none;"
+            )
+            self._inet_txt.setText("Terhubung ke server")
+            self._inet_txt.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_P.GREEN}; "
+                f"background: transparent; border: none;"
+            )
+            self._inet_retry_btn.setVisible(False)
+            self._apply_banner_style(self._inet_banner, _P.NET_ONLINE_BG, _P.NET_ONLINE_BD)
+
+        elif state == "offline":
+            self._inet_dot.setStyleSheet(
+                f"font-size: 10px; color: {_P.RED}; background: transparent; border: none;"
+            )
+            self._inet_txt.setText("Tidak ada koneksi — aktivasi membutuhkan internet")
+            self._inet_txt.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_P.RED}; "
+                f"background: transparent; border: none;"
+            )
+            self._inet_retry_btn.setVisible(True)
+            self._apply_banner_style(self._inet_banner, _P.NET_OFFLINE_BG, _P.NET_OFFLINE_BD)
+
+        else:  # checking
+            self._inet_dot.setStyleSheet(
+                f"font-size: 10px; color: {_P.TXT_MUTED}; background: transparent; border: none;"
+            )
+            self._inet_txt.setText("Memeriksa koneksi ke server...")
+            self._inet_txt.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_P.TXT_MUTED}; "
+                f"background: transparent; border: none;"
+            )
+            self._inet_retry_btn.setVisible(False)
+            self._apply_banner_style(self._inet_banner, _P.NET_CHECKING_BG, _P.NET_CHECKING_BD)
+
     # ── Logic ─────────────────────────────────────────────────────────────────
 
     def _on_code_complete(self):
         """Kode sudah 25 char — cek duplikat lokal, lalu debounce 400ms ke server."""
         self._preview_seq += 1
         self._debounce.stop()
+        self._last_preview = None   # reset preview lama saat kode berubah
 
         # Cek duplikat instan (tanpa network)
         if self._reactivation_mode:
@@ -474,16 +621,16 @@ class LicenseDialog(QDialog):
         self._worker.start()
 
     def _apply_preview_result(self, result: dict, code: str):
-        """Update status label berdasarkan hasil fetch — dipanggil di main thread via signal."""
-        err = result.get("error", "")
+        """Update status label — dipanggil di main thread via signal."""
+        self._last_preview = result   # simpan untuk dicek saat tombol Aktifkan ditekan
+        err    = result.get("error", "")
+        status = result.get("status", "")
 
         if not result.get("ok"):
             if err == "timeout":
                 self._set_status("⚠️  Server lambat — klik Aktifkan untuk melanjutkan", _P.AMBER)
             elif err == "offline":
                 self._set_status("⚠️  Tidak ada koneksi internet", _P.AMBER)
-            elif err == "endpoint_missing":
-                self._set_status("🔑  Klik Aktifkan Sekarang untuk memvalidasi kode", _P.ACCENT)
             else:
                 self._set_status("⚠️  Gagal menghubungi server — klik Aktifkan untuk coba", _P.AMBER)
             return
@@ -492,17 +639,14 @@ class LicenseDialog(QDialog):
             self._set_status("❌  Kode tidak ditemukan — periksa kembali", _P.RED)
             return
 
-        status = result.get("status", "")
-        msg    = result.get("msg", "")
-
         if status == "revoked":
-            self._set_status(f"🚫  {msg}", _P.RED)
+            self._set_status(f"🚫  {result.get('msg', '')}", _P.RED)
         elif status == "expired":
-            self._set_status(f"⏰  {msg}", _P.AMBER)
+            self._set_status(f"⏰  {result.get('msg', 'Kode sudah kadaluarsa')}", _P.RED)
         else:
             plan_key = code.replace('-', '')[0].upper()
             color    = _P.PLAN_COLORS.get(plan_key, _P.GREEN)
-            self._set_status(f"✅  {msg}", color)
+            self._set_status(f"✅  {result.get('msg', '')}", color)
 
     def _do_activate(self):
         """Tombol Aktifkan ditekan."""
@@ -520,6 +664,18 @@ class LicenseDialog(QDialog):
                     "ℹ️  Kode ini sudah aktif — masukkan kode berbeda untuk ganti lisensi",
                     _P.AMBER
                 )
+                self._code_input.set_error_style()
+                return
+
+        # Blok hard jika preview sudah konfirmasi expired atau revoked
+        if self._last_preview and self._last_preview.get("ok") and self._last_preview.get("found"):
+            prev_status = self._last_preview.get("status", "")
+            if prev_status == "expired":
+                self._set_status("⏰  Kode ini sudah kadaluarsa — tidak bisa diaktivasi", _P.RED)
+                self._code_input.set_error_style()
+                return
+            if prev_status == "revoked":
+                self._set_status("🚫  Kode ini telah dinonaktifkan — tidak bisa diaktivasi", _P.RED)
                 self._code_input.set_error_style()
                 return
 
@@ -554,9 +710,10 @@ class LicenseDialog(QDialog):
 
     def closeEvent(self, event):
         self._debounce.stop()
-        # Stop preview worker jika masih jalan
-        if self._worker and self._worker.isRunning():
-            self._preview_seq += 1   # invalidate — supaya signal done diabaikan
-            self._worker.quit()
-            self._worker.wait(500)
+        self._inet_timer.stop()
+        # Stop semua background thread
+        for w in [self._worker, self._inet_checker]:
+            if w and w.isRunning():
+                w.quit()
+                w.wait(300)
         event.accept()

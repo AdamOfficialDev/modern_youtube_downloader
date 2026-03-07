@@ -35,6 +35,7 @@ cookies/
 
 # Logs
 *.log
+.license
 
 
 download_history.json

@@ -182,46 +182,52 @@ class AboutDialog(QDialog):
 class LicenseWatcher(QThread):
     """
     Background thread — cek status lisensi ke server tiap 1 menit.
-    Emit sinyal jika lisensi dicabut ATAU dipulihkan kembali oleh admin.
+    Emit sinyal jika lisensi dicabut/expired ATAU dipulihkan kembali oleh admin.
     """
-    license_revoked  = pyqtSignal(str)   # lisensi tidak valid → bawa pesan alasan
-    license_restored = pyqtSignal(str)   # lisensi valid kembali → bawa info plan
+    license_invalid  = pyqtSignal(str, str)  # (reason: 'revoked'|'expired'|other, pesan)
+    license_restored = pyqtSignal(str)        # plan_info
 
     def __init__(self, manager: LicenseManager, interval_seconds: int = 60):
         super().__init__()
         self._mgr            = manager
         self._interval       = interval_seconds
         self._running        = True
-        self._was_locked     = False   # track state sebelumnya
+        self._was_locked     = False
 
     def stop(self):
         self._running = False
 
     def run(self):
-        import time
-        # Tunggu 30 detik setelah startup sebelum cek pertama
-        for _ in range(30):
+        import time as _t
+
+        try:
+            cache = self._mgr.get_license_info()
+            if cache and (cache.get("revoked") or cache.get("expired")):
+                self._was_locked = True
+        except Exception:
+            pass
+
+        # Tunggu 1 interval penuh — startup sudah cek di is_activated()
+        for _ in range(self._interval):
             if not self._running:
                 return
-            time.sleep(1)
+            _t.sleep(1)
 
         while self._running:
             try:
                 is_valid = self._mgr.is_activated()
 
                 if not is_valid and not self._was_locked:
-                    # Baru saja dicabut
                     self._was_locked = True
-                    cache  = self._mgr.get_license_info()
-                    reason = (
-                        "Lisensi kamu telah dinonaktifkan oleh administrator."
-                        if cache else
-                        "File lisensi tidak ditemukan."
-                    )
-                    self.license_revoked.emit(reason)
+                    cache  = self._mgr.get_license_info() or {}
+                    reason = cache.get("invalid_reason", "revoked")
+                    if reason == "expired":
+                        msg = "Lisensi kamu sudah kadaluarsa."
+                    else:
+                        msg = "Lisensi kamu telah dinonaktifkan oleh administrator."
+                    self.license_invalid.emit(reason, msg)
 
                 elif is_valid and self._was_locked:
-                    # Admin sudah restore — pulih kembali!
                     self._was_locked = False
                     cache     = self._mgr.get_license_info() or {}
                     plan_info = f"{cache.get('plan', 'Unknown')} ({cache.get('label', '')})"
@@ -230,12 +236,11 @@ class LicenseWatcher(QThread):
             except Exception as e:
                 print(f"[LicenseWatcher] Error: {e}")
 
-            # Tunggu interval dengan granularitas 1 detik agar stop() responsif
             for _ in range(self._interval):
                 if not self._running:
                     return
-                import time as _t
                 _t.sleep(1)
+
 
 
 class ModernVideoDownloader(QMainWindow):
@@ -265,7 +270,7 @@ class ModernVideoDownloader(QMainWindow):
         # ── License Watcher — cek tiap 1 menit ────────────────────────────────
         self._license_mgr     = LicenseManager(BASE_PATH)
         self._license_watcher = LicenseWatcher(self._license_mgr, interval_seconds=60)
-        self._license_watcher.license_revoked.connect(self._on_license_revoked)
+        self._license_watcher.license_invalid.connect(self._on_license_invalid)
         self._license_watcher.license_restored.connect(self._on_license_restored)
         self._license_watcher.start()
         # ───────────────────────────────────────────────────────────────────────
@@ -749,12 +754,23 @@ class ModernVideoDownloader(QMainWindow):
 
         self.setCentralWidget(central)
 
-    def _on_license_revoked(self, reason: str):
-        """Dipanggil dari LicenseWatcher saat lisensi tidak valid."""
-        self._license_locked = True   # Pasang flag dulu sebelum apapun
+    def _on_license_invalid(self, reason: str, msg: str):
+        """Dipanggil dari LicenseWatcher saat lisensi expired atau revoked."""
+        self._license_locked = True
 
-        self._revoke_banner_msg.setText(f"⚠️  {reason}  —  Semua fitur dinonaktifkan.")
-        self._revoke_reactivate_btn.setText("🔑  Masukkan Kode Baru")
+        if reason == "expired":
+            banner_msg = f"⏰  {msg}  —  Perbarui lisensi untuk melanjutkan."
+            btn_text   = "🔑  Perbarui Lisensi"
+            dlg_title  = "⏰  Lisensi Kadaluarsa"
+            dlg_detail = f"{msg}\n\nSemua fitur telah dikunci.\nBeli lisensi baru untuk melanjutkan."
+        else:
+            banner_msg = f"🚫  {msg}  —  Semua fitur dinonaktifkan."
+            btn_text   = "🔑  Masukkan Kode Baru"
+            dlg_title  = "🚫  Lisensi Dinonaktifkan"
+            dlg_detail = f"{msg}\n\nSemua fitur telah dikunci.\nHubungi administrator untuk info lebih lanjut."
+
+        self._revoke_banner_msg.setText(banner_msg)
+        self._revoke_reactivate_btn.setText(btn_text)
         self._revoke_reactivate_btn.show()
         self._revoke_banner.show()
 
@@ -763,18 +779,11 @@ class ModernVideoDownloader(QMainWindow):
         for i in range(self.tabs.count()):
             if i != settings_index:
                 self.tabs.setTabEnabled(i, False)
-                self.tabs.setTabToolTip(i, "🔒 Lisensi tidak aktif — hubungi administrator")
-
+                self.tabs.setTabToolTip(i, "🔒 Lisensi tidak aktif")
         self.tabs.setCurrentIndex(settings_index)
 
-        QMessageBox.warning(
-            self,
-            "⚠️  Lisensi Dinonaktifkan",
-            f"{reason}\n\nSemua fitur telah dikunci.\n"
-            "Hubungi administrator untuk mengaktifkan kembali.\n"
-            "Program akan otomatis terbuka jika lisensi dipulihkan.",
-            QMessageBox.StandardButton.Ok
-        )
+        QMessageBox.warning(self, dlg_title, dlg_detail, QMessageBox.StandardButton.Ok)
+
 
     def _unlock_all_tabs(self):
         """Buka kunci semua tab, re-check YouTube API di background, lalu terapkan state."""
@@ -824,7 +833,7 @@ class ModernVideoDownloader(QMainWindow):
             self._license_watcher.stop()
             self._license_watcher.wait(2000)
             self._license_watcher = LicenseWatcher(mgr, interval_seconds=60)
-            self._license_watcher.license_revoked.connect(self._on_license_revoked)
+            self._license_watcher.license_invalid.connect(self._on_license_invalid)
             self._license_watcher.license_restored.connect(self._on_license_restored)
             self._license_watcher.start()
 
@@ -1041,11 +1050,48 @@ def main():
     app = QApplication(sys.argv)
 
     # ── LICENSE GUARD ──────────────────────────────────────────────────────
-    mgr = LicenseManager(BASE_PATH)
-    if not mgr.is_activated():
+    mgr      = LicenseManager(BASE_PATH)
+    is_valid = mgr.is_activated()
+
+    if not is_valid:
+        cache  = mgr.get_license_info()
+        reason = (cache.get("invalid_reason", "") if cache else "")
+
+        # Tampilkan pesan spesifik sebelum dialog aktivasi
+        if cache and reason:
+            from PyQt6.QtWidgets import QMessageBox
+            mb = QMessageBox()
+            mb.setStandardButtons(QMessageBox.StandardButton.Ok)
+            mb.setStyleSheet("QMessageBox { background-color: #0a0c14; color: #e8ecff; }")
+
+            if reason == "expired":
+                mb.setWindowTitle("⏰  Lisensi Kadaluarsa")
+                mb.setIcon(QMessageBox.Icon.Warning)
+                mb.setText(
+                    "<b>Lisensi kamu sudah kadaluarsa.</b><br><br>"
+                    "Masa berlaku lisensi telah habis.<br>"
+                    "Masukkan kode lisensi baru untuk melanjutkan."
+                )
+            elif reason == "revoked":
+                mb.setWindowTitle("🚫  Lisensi Dinonaktifkan")
+                mb.setIcon(QMessageBox.Icon.Critical)
+                mb.setText(
+                    "<b>Lisensi kamu telah dinonaktifkan.</b><br><br>"
+                    "Kode aktivasi dicabut oleh administrator.<br>"
+                    "Masukkan kode lisensi baru untuk melanjutkan."
+                )
+            else:
+                mb.setWindowTitle("⚠️  Lisensi Tidak Valid")
+                mb.setIcon(QMessageBox.Icon.Warning)
+                mb.setText(
+                    "<b>Lisensi kamu tidak valid.</b><br><br>"
+                    "Masukkan kode lisensi untuk melanjutkan."
+                )
+            mb.exec()
+
         dlg = LicenseDialog(mgr)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            sys.exit(0)   # Keluar jika user tutup tanpa aktivasi
+            sys.exit(0)
     # ───────────────────────────────────────────────────────────────────────
 
     window = ModernVideoDownloader()
