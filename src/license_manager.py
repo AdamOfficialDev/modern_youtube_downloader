@@ -2,8 +2,9 @@
 License Manager — Modern Video Downloader
 =========================================
 Sistem validasi lisensi ONLINE via server Railway.
-- Aktivasi: kirim kode + machine_id ke server → simpan respons lokal
+- Aktivasi: kirim kode + machine_id ke server → simpan cache .license
 - Verifikasi startup: ping server untuk cek status terbaru
+- Preview dialog: fetch info kode dari server sebelum aktivasi
 
 Format kode: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  (25 chars + 4 dashes)
 """
@@ -18,13 +19,14 @@ import requests
 from datetime import datetime
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CONFIG — ganti SERVER_URL setelah deploy ke Railway
+#  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 SERVER_URL = os.environ.get(
     "LICENSE_SERVER_URL",
-    "https://web-production-0375c.up.railway.app/"     # ← GANTI setelah deploy
+    "https://web-production-0375c.up.railway.app"
 )
-REQUEST_TIMEOUT = 10   # detik
+REQUEST_TIMEOUT = 10   # detik — untuk activate & verify (startup)
+PREVIEW_TIMEOUT =  5   # detik — untuk fetch info dialog (bisa sedikit lebih lama)
 
 PLANS = {
     'T': {'name': 'Trial',      'days': 7,    'label': '7 Hari',      'color': '#f5a623'},
@@ -39,7 +41,6 @@ _LOCAL_SECRET = os.environ.get("LICENSE_SECRET", "ganti_dengan_output_dari_perin
 
 
 def _sign(payload: str) -> str:
-    """Hitung 8-char HMAC signature — dipakai untuk live preview di dialog."""
     h = hmac.new(_LOCAL_SECRET.encode(), payload.encode('utf-8'), hashlib.sha256)
     return h.hexdigest()[:8].upper()
 
@@ -55,17 +56,6 @@ def get_machine_id() -> str:
 
 
 class LicenseManager:
-    """
-    Validasi lisensi ONLINE.
-
-    Alur aktivasi (sekali):
-        activate(code) → POST /api/activate → simpan cache .license
-
-    Alur startup (tiap buka app):
-        is_activated() → POST /api/verify
-        Jika offline → fallback cache (grace period 72 jam)
-    """
-
     GRACE_PERIOD_HOURS = 72
 
     def __init__(self, base_path: str = "."):
@@ -82,31 +72,11 @@ class LicenseManager:
             return raw
         return f"{raw[0:5]}-{raw[5:10]}-{raw[10:15]}-{raw[15:20]}-{raw[20:25]}"
 
-    def validate_code(self, code: str) -> tuple[bool, dict | None, str]:
-        """
-        Validasi format & HMAC kode secara LOKAL (tanpa hit server).
-        Dipakai untuk live preview di dialog saat user mengetik kode.
+    # ── Cache helpers ─────────────────────────────────────────────────────────
 
-        Returns:
-            (is_valid, plan_info_or_None, pesan)
-        """
-        raw = self._clean(code)
-        if len(raw) != 25:
-            return False, None, "Format kode salah — harus 25 karakter"
-
-        plan_char   = raw[0]
-        random_part = raw[1:17]
-        sig_given   = raw[17:25]
-
-        if plan_char not in PLANS:
-            return False, None, "Tipe lisensi tidak dikenal"
-
-        sig_expected = _sign(plan_char + random_part)
-        if sig_given != sig_expected:
-            return False, None, "Kode tidak valid atau telah dimodifikasi"
-
-        plan_info = PLANS[plan_char]
-        return True, plan_info, f"Kode valid — Paket {plan_info['name']} ({plan_info['label']})"
+    def get_active_code(self) -> str | None:
+        cache = self._load_cache()
+        return cache.get("code") if cache else None
 
     def _save_cache(self, data: dict):
         data['cached_at'] = datetime.now().isoformat()
@@ -135,6 +105,94 @@ class LicenseManager:
             return hours_since <= self.GRACE_PERIOD_HOURS
         except ValueError:
             return False
+
+    # ── Preview: fetch info kode dari server sebelum aktivasi ─────────────────
+
+    def fetch_code_info(self, code: str) -> dict:
+        """
+        Fetch info kode dari PostgreSQL via endpoint /api/preview.
+        GET /api/preview?code=XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+        Tidak butuh machine_id, tidak butuh HMAC.
+        """
+        formatted = self._format_code(code)
+        if len(self._clean(code)) != 25:
+            return {"ok": False, "found": False, "valid": False,
+                    "error": "format", "msg": "Format kode salah"}
+
+        url = f"{SERVER_URL}/api/preview"
+        print(f"[LicenseMgr] preview → {url}?code={formatted}")
+
+        try:
+            resp = requests.get(url, params={"code": formatted},
+                                timeout=PREVIEW_TIMEOUT)
+
+            print(f"[LicenseMgr] status={resp.status_code} body={resp.text[:300]}")
+
+            if resp.status_code == 200:
+                return self._parse_preview_response(resp.json())
+
+            if resp.status_code == 404:
+                return {"ok": False, "found": False, "valid": False,
+                        "error": "endpoint_missing",
+                        "msg": ""}   # dialog akan tampilkan pesan netral
+
+            return {"ok": False, "found": False, "valid": False,
+                    "error": f"http_{resp.status_code}", "msg": ""}
+
+        except requests.exceptions.Timeout:
+            print(f"[LicenseMgr] timeout ({PREVIEW_TIMEOUT}s)")
+            return {"ok": False, "found": False, "valid": False,
+                    "error": "timeout", "msg": ""}
+        except requests.exceptions.ConnectionError as e:
+            print(f"[LicenseMgr] connection error: {e}")
+            return {"ok": False, "found": False, "valid": False,
+                    "error": "offline", "msg": ""}
+        except Exception as e:
+            print(f"[LicenseMgr] unexpected: {e}")
+            return {"ok": False, "found": False, "valid": False,
+                    "error": str(e), "msg": ""}
+
+    def _parse_preview_response(self, data: dict) -> dict:
+        if not data.get("found"):
+            return {"ok": True, "found": False, "valid": False,
+                    "msg": "Kode tidak ditemukan — periksa kembali atau hubungi developer"}
+
+        plan_name = data.get("plan_name", "")
+        label     = data.get("label", "")
+        status    = data.get("status", "inactive")
+        lifetime  = data.get("lifetime", False)
+        expires   = data.get("expires_at")
+
+        base = {"ok": True, "found": True, "plan_name": plan_name,
+                "label": label, "status": status,
+                "expires_at": expires, "lifetime": lifetime}
+
+        if status == "revoked":
+            return {**base, "valid": False,
+                    "msg": "Kode ini telah dinonaktifkan — hubungi developer"}
+
+        if status == "expired":
+            return {**base, "valid": False,
+                    "msg": f"Kode sudah kadaluarsa — Paket {plan_name}"}
+
+        if status == "inactive":
+            msg = f"Paket {plan_name} ({label}) · Siap diaktivasi"
+        elif lifetime:
+            msg = f"Paket {plan_name} · Selamanya ∞"
+        elif expires:
+            try:
+                exp_dt    = datetime.fromisoformat(expires)
+                remaining = (exp_dt - datetime.now()).days
+                date_str  = exp_dt.strftime('%d %b %Y')
+                msg = f"Paket {plan_name} ({label}) · Berakhir {date_str} ({remaining} hari lagi)"
+            except Exception:
+                msg = f"Paket {plan_name} ({label})"
+        else:
+            msg = f"Paket {plan_name} ({label})"
+
+        return {**base, "valid": True, "msg": msg}
+
+    # ── Activate ──────────────────────────────────────────────────────────────
 
     def activate(self, code: str) -> tuple[bool, str]:
         formatted = self._format_code(code)
@@ -165,21 +223,19 @@ class LicenseManager:
         except Exception as e:
             return False, f"❌ Error: {str(e)}"
 
+    # ── Verify (startup) ──────────────────────────────────────────────────────
+
     def is_activated(self) -> bool:
         cache = self._load_cache()
-
-        # Jika tidak ada cache sama sekali → belum pernah aktivasi
         if not cache:
             return False
-
-        # Pastikan machine ID cocok
         if cache.get('machine_id') and cache['machine_id'] != self._machine_id:
             return False
-
-        # Selalu coba verifikasi ke server selama ada kode tersimpan
         code = cache.get("code", "")
         if not code:
             return False
+
+        was_revoked = cache.get("revoked", False)
 
         try:
             resp = requests.post(
@@ -188,9 +244,7 @@ class LicenseManager:
                 timeout=REQUEST_TIMEOUT
             )
             data = resp.json()
-
             if data.get("valid"):
-                # Server konfirmasi valid — update cache dengan data terbaru
                 self._save_cache({
                     **cache,
                     "plan":       data.get("plan",       cache.get("plan", "")),
@@ -198,29 +252,25 @@ class LicenseManager:
                     "expires_at": data.get("expires_at", cache.get("expires_at")),
                     "lifetime":   data.get("lifetime",   cache.get("lifetime", False)),
                     "machine_id": self._machine_id,
-                    "revoked":    False,   # tandai aktif kembali
+                    "revoked":    False,
                 })
                 return True
             else:
-                # Server bilang tidak valid — tandai revoked di cache
-                # JANGAN hapus file agar kode tetap tersimpan untuk re-check berikutnya
-                self._save_cache({
-                    **cache,
-                    "revoked": True,
-                })
+                self._save_cache({**cache, "revoked": True,
+                                  "revoked_at": datetime.now().isoformat()})
                 return False
 
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
-            # Offline → pakai cache, tapi jika sudah ditandai revoked tetap False
-            if cache.get("revoked"):
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if was_revoked:
+                return False
+            return self._cache_still_valid(cache)
+        except Exception as e:
+            print(f"[LicenseManager] verify error: {e}")
+            if was_revoked:
                 return False
             return self._cache_still_valid(cache)
 
-        except Exception:
-            if cache.get("revoked"):
-                return False
-            return self._cache_still_valid(cache)
+    # ── Info helpers ──────────────────────────────────────────────────────────
 
     def get_license_info(self) -> dict | None:
         return self._load_cache()
@@ -229,7 +279,7 @@ class LicenseManager:
         cache = self._load_cache()
         if not cache:
             return "Tidak aktif"
-        plan  = cache.get('plan', '')
+        plan = cache.get('plan', '')
         if cache.get('lifetime'):
             return f"Aktif — {plan} (Lifetime ∞)"
         expires_str = cache.get('expires_at')

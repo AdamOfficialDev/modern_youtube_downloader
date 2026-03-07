@@ -12,10 +12,28 @@ from PyQt6.QtWidgets import (
     QPushButton, QFrame, QWidget, QApplication, QSizePolicy,
     QGraphicsDropShadowEffect,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QBrush, QLinearGradient
 
 from src.license_manager import LicenseManager, PLANS
+
+
+# ── Background worker untuk fetch info kode (Qt-safe) ────────────────────────
+class _PreviewWorker(QThread):
+    """
+    Fetch info kode di background thread.
+    Emit signal `done` dengan dict result ke main thread — Qt-safe.
+    """
+    done = pyqtSignal(dict)
+
+    def __init__(self, mgr: LicenseManager, code: str):
+        super().__init__()
+        self._mgr  = mgr
+        self._code = code
+
+    def run(self):
+        result = self._mgr.fetch_code_info(self._code)
+        self.done.emit(result)
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -156,16 +174,29 @@ class LicenseDialog(QDialog):
 
     Cara pakai::
 
+        # Startup — belum pernah aktivasi
         mgr = LicenseManager(BASE_PATH)
-        if not mgr.is_activated():
-            dlg = LicenseDialog(mgr)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                sys.exit(0)
+        dlg = LicenseDialog(mgr)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+
+        # Help → Activate (sudah aktif, mau masukkan kode baru)
+        dlg = LicenseDialog(mgr, parent=self, reactivation_mode=True)
+        dlg.exec()
     """
 
-    def __init__(self, license_manager: LicenseManager, parent=None):
+    def __init__(self, license_manager: LicenseManager, parent=None,
+                 reactivation_mode: bool = False):
         super().__init__(parent)
-        self._mgr = license_manager
+        self._mgr               = license_manager
+        self._reactivation_mode = reactivation_mode
+        self._preview_seq       = 0
+        self._worker            = None   # referensi ke QThread aktif
+
+        # Debounce timer — tunggu 400ms setelah kode lengkap
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.timeout.connect(self._run_preview)
 
         self.setWindowTitle("Aktivasi Lisensi — Modern Video Downloader")
         self.setFixedSize(580, 640)
@@ -196,7 +227,11 @@ class LicenseDialog(QDialog):
         card_lay.setSpacing(20)
 
         # ── Code input section
-        card_lay.addWidget(self._lbl("Masukkan Kode Lisensi Anda", size=14,
+        input_label_text = (
+            "Masukkan Kode Lisensi Baru" if self._reactivation_mode
+            else "Masukkan Kode Lisensi Anda"
+        )
+        card_lay.addWidget(self._lbl(input_label_text, size=14,
                                      weight="700", color=_P.TXT_SEC))
 
         self._code_input = _CodeInput()
@@ -300,12 +335,20 @@ class LicenseDialog(QDialog):
         top_row.addStretch()
         lay.addLayout(top_row)
 
-        # Sub-heading
-        sub = QLabel("⚠️  Aktivasi diperlukan untuk menggunakan semua fitur")
-        sub.setStyleSheet(
-            f"color: {_P.AMBER}; font-size: 12px; font-weight: 600; "
-            f"background: transparent; border: none;"
-        )
+        # Sub-heading — beda teks tergantung mode
+        if self._reactivation_mode:
+            status_text = self._mgr.get_status_text()
+            sub = QLabel(f"✅  Lisensi aktif: {status_text}")
+            sub.setStyleSheet(
+                f"color: {_P.GREEN}; font-size: 12px; font-weight: 600; "
+                f"background: transparent; border: none;"
+            )
+        else:
+            sub = QLabel("⚠️  Aktivasi diperlukan untuk menggunakan semua fitur")
+            sub.setStyleSheet(
+                f"color: {_P.AMBER}; font-size: 12px; font-weight: 600; "
+                f"background: transparent; border: none;"
+            )
         lay.addWidget(sub)
         return w
 
@@ -384,14 +427,82 @@ class LicenseDialog(QDialog):
     # ── Logic ─────────────────────────────────────────────────────────────────
 
     def _on_code_complete(self):
-        """Kode sudah 25 char — validasi live (tanpa aktivasi)."""
+        """Kode sudah 25 char — cek duplikat lokal, lalu debounce 400ms ke server."""
+        self._preview_seq += 1
+        self._debounce.stop()
+
+        # Cek duplikat instan (tanpa network)
+        if self._reactivation_mode:
+            code = self._code_input.text()
+            active = self._mgr.get_active_code()
+            if active:
+                raw_in = code.replace('-', '').upper()
+                raw_ac = active.replace('-', '').upper()
+                if raw_in == raw_ac:
+                    self._set_status("ℹ️  Kode ini sudah aktif di perangkat ini", _P.AMBER)
+                    return
+
+        self._set_status("🔍  Memeriksa kode...", _P.TXT_MUTED)
+        self._debounce.start(400)
+
+    def _run_preview(self):
+        """Dipanggil debounce — launch QThread worker untuk fetch info dari server."""
         code = self._code_input.text()
-        is_valid, plan_info, msg = self._mgr.validate_code(code)
-        if is_valid:
-            color = _P.PLAN_COLORS.get(code.replace('-','')[0], _P.GREEN)
-            self._set_status(f"✅  {msg}", color)
+        if len(code.replace('-', '')) != 25:
+            return
+
+        # Increment sequence — worker lama yang masih jalan akan diabaikan hasilnya
+        self._preview_seq += 1
+        my_seq = self._preview_seq
+
+        # Stop worker lama jika masih jalan
+        if self._worker and self._worker.isRunning():
+            self._worker.done.disconnect()
+            self._worker.quit()
+            self._worker.wait(300)
+
+        # Buat worker baru — signal `done` emit ke main thread secara Qt-safe
+        self._worker = _PreviewWorker(self._mgr, code)
+
+        def _on_done(result: dict):
+            # Abaikan jika sudah ada request lebih baru
+            if my_seq != self._preview_seq:
+                return
+            self._apply_preview_result(result, code)
+
+        self._worker.done.connect(_on_done)
+        self._worker.start()
+
+    def _apply_preview_result(self, result: dict, code: str):
+        """Update status label berdasarkan hasil fetch — dipanggil di main thread via signal."""
+        err = result.get("error", "")
+
+        if not result.get("ok"):
+            if err == "timeout":
+                self._set_status("⚠️  Server lambat — klik Aktifkan untuk melanjutkan", _P.AMBER)
+            elif err == "offline":
+                self._set_status("⚠️  Tidak ada koneksi internet", _P.AMBER)
+            elif err == "endpoint_missing":
+                self._set_status("🔑  Klik Aktifkan Sekarang untuk memvalidasi kode", _P.ACCENT)
+            else:
+                self._set_status("⚠️  Gagal menghubungi server — klik Aktifkan untuk coba", _P.AMBER)
+            return
+
+        if not result.get("found"):
+            self._set_status("❌  Kode tidak ditemukan — periksa kembali", _P.RED)
+            return
+
+        status = result.get("status", "")
+        msg    = result.get("msg", "")
+
+        if status == "revoked":
+            self._set_status(f"🚫  {msg}", _P.RED)
+        elif status == "expired":
+            self._set_status(f"⏰  {msg}", _P.AMBER)
         else:
-            self._set_status(f"❌  {msg}", _P.RED)
+            plan_key = code.replace('-', '')[0].upper()
+            color    = _P.PLAN_COLORS.get(plan_key, _P.GREEN)
+            self._set_status(f"✅  {msg}", color)
 
     def _do_activate(self):
         """Tombol Aktifkan ditekan."""
@@ -401,12 +512,22 @@ class LicenseDialog(QDialog):
             self._code_input.setFocus()
             return
 
+        # Blok kode yang sama (reactivation mode)
+        if self._reactivation_mode:
+            active = self._mgr.get_active_code()
+            if active and code.replace('-', '').upper() == active.replace('-', '').upper():
+                self._set_status(
+                    "ℹ️  Kode ini sudah aktif — masukkan kode berbeda untuk ganti lisensi",
+                    _P.AMBER
+                )
+                self._code_input.set_error_style()
+                return
+
         self._activate_btn.setEnabled(False)
         self._activate_btn.setText("⏳  Memvalidasi...")
         QApplication.processEvents()
 
-        # Sedikit jeda agar UX terasa natural
-        QTimer.singleShot(400, lambda: self._finish_activation(code))
+        QTimer.singleShot(300, lambda: self._finish_activation(code))
 
     def _finish_activation(self, code: str):
         success, msg = self._mgr.activate(code)
@@ -424,7 +545,6 @@ class LicenseDialog(QDialog):
                     font-weight: 800;
                 }}
             """)
-            # Tutup dialog setelah 1.5 detik
             QTimer.singleShot(1500, self.accept)
         else:
             self._set_status(f"❌  {msg}", _P.RED)
@@ -433,5 +553,10 @@ class LicenseDialog(QDialog):
             self._activate_btn.setText("🔓  Aktifkan Sekarang")
 
     def closeEvent(self, event):
-        """Tutup dialog = tolak (app akan exit)."""
+        self._debounce.stop()
+        # Stop preview worker jika masih jalan
+        if self._worker and self._worker.isRunning():
+            self._preview_seq += 1   # invalidate — supaya signal done diabaikan
+            self._worker.quit()
+            self._worker.wait(500)
         event.accept()

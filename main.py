@@ -813,7 +813,7 @@ class ModernVideoDownloader(QMainWindow):
     def _show_reactivate_dialog(self):
         """Buka dialog aktivasi dari banner (untuk kode baru)."""
         mgr = LicenseManager(BASE_PATH)
-        dlg = LicenseDialog(mgr, parent=self)
+        dlg = LicenseDialog(mgr, parent=self, reactivation_mode=True)
         result = dlg.exec()
         if result == QDialog.DialogCode.Accepted:
             self._license_locked = False
@@ -1032,7 +1032,9 @@ class ModernVideoDownloader(QMainWindow):
 
     def show_license_dialog(self):
         mgr = LicenseManager(BASE_PATH)
-        dlg = LicenseDialog(mgr, parent=self)
+        # Selalu reactivation_mode=True karena dipanggil setelah app berjalan
+        # (artinya user sudah punya lisensi aktif)
+        dlg = LicenseDialog(mgr, parent=self, reactivation_mode=True)
         dlg.exec()
 
 def main():
