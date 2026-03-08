@@ -14,8 +14,6 @@ Format kode: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  (25 chars + 4 dashes)
 import hashlib
 import json
 import os
-import platform
-import uuid
 import requests
 from datetime import datetime
 
@@ -40,10 +38,62 @@ PLANS = {
 
 
 def get_machine_id() -> str:
+    """
+    Generate machine ID yang STABIL — tidak berubah meski restart atau ganti network.
+
+    Prioritas:
+    1. Windows Machine GUID (dari registry) — paling stabil, unik per instalasi Windows
+    2. Linux machine-id — stabil di Linux
+    3. Hostname + platform sebagai fallback
+    """
+    import platform
+    import hashlib
+
+    system = platform.system()
+
+    # ── Windows: baca Machine GUID dari registry ──────────────────────────────
+    if system == "Windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Cryptography"
+            )
+            guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+            winreg.CloseKey(key)
+            if guid:
+                return hashlib.sha256(guid.encode()).hexdigest()[:32]
+        except Exception:
+            pass
+
+    # ── Linux: baca /etc/machine-id ───────────────────────────────────────────
+    if system == "Linux":
+        try:
+            with open("/etc/machine-id") as f:
+                mid = f.read().strip()
+                if mid:
+                    return hashlib.sha256(mid.encode()).hexdigest()[:32]
+        except Exception:
+            pass
+
+    # ── macOS: baca IOPlatformUUID ────────────────────────────────────────────
+    if system == "Darwin":
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                stderr=subprocess.DEVNULL
+            ).decode()
+            for line in out.splitlines():
+                if "IOPlatformUUID" in line:
+                    uid = line.split('"')[-2]
+                    return hashlib.sha256(uid.encode()).hexdigest()[:32]
+        except Exception:
+            pass
+
+    # ── Fallback: hostname + platform (tidak ideal tapi lebih stabil dari MAC) ─
     try:
-        mac  = uuid.getnode()
-        host = platform.node()
-        raw  = f"{mac}-{host}-{platform.system()}"
+        raw = f"{platform.node()}-{platform.system()}-{platform.machine()}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
     except Exception:
         return hashlib.sha256(b"fallback-machine").hexdigest()[:32]
