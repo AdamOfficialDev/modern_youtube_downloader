@@ -91,56 +91,59 @@ class TelegramBotManager:
 
     def stop_bot(self) -> bool:
         """
-        Stop the Telegram bot.
+        Stop the Telegram bot gracefully.
 
-        Returns:
-            True if the bot was stopped successfully, False otherwise
+        The correct shutdown sequence for python-telegram-bot is:
+          1. Call application.stop() on the SAME event loop the bot runs on
+             (NOT a new loop — that causes the Conflict error on next start)
+          2. Wait for the bot thread to exit naturally
+          3. Only then clear references so the next start gets a clean slate
         """
         if not self.is_running:
             logger.warning("Bot is not running")
             return False
 
         try:
-            # Mark as stopping to prevent new operations
             self.is_running = False
 
-            # Stop the bot instance in a non-blocking way
-            if self.bot_instance:
-                try:
-                    # Signal the bot to stop
-                    if hasattr(self.bot_instance, 'application') and self.bot_instance.application:
-                        # Use a separate thread to stop the application to avoid blocking
-                        import threading
-                        def stop_application():
-                            try:
-                                import asyncio
-                                # Get the existing event loop from the bot thread
-                                if hasattr(self.bot_instance, 'application'):
-                                    # Create a new event loop for stopping
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    loop.run_until_complete(self.bot_instance.application.stop())
-                                    loop.close()
-                            except Exception as e:
-                                logger.error(f"Error in stop thread: {e}")
+            # ── Signal the running application to stop via its own event loop ──
+            if (self.bot_instance
+                    and hasattr(self.bot_instance, "application")
+                    and self.bot_instance.application):
+                app = self.bot_instance.application
+                loop = getattr(app, "_loop", None)   # PTB stores the loop internally
+                if loop is None and hasattr(app, "update_queue"):
+                    # Fallback: schedule stop via updater
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = None
 
-                        stop_thread = threading.Thread(target=stop_application, daemon=True)
-                        stop_thread.start()
-                        stop_thread.join(timeout=3)  # Wait max 3 seconds
+                if loop and loop.is_running():
+                    # Schedule coroutine on the bot's own loop — this is the safe way
+                    asyncio.run_coroutine_threadsafe(app.stop(), loop)
+                    logger.info("Stop signal sent to bot event loop")
+                else:
+                    # Loop not available — set a stop flag via updater if possible
+                    try:
+                        if hasattr(app, "updater") and app.updater:
+                            asyncio.run_coroutine_threadsafe(
+                                app.updater.stop(), asyncio.get_event_loop()
+                            )
+                    except Exception:
+                        pass
 
-                except Exception as e:
-                    logger.error(f"Error stopping bot application: {e}")
-
-            # Wait for the main bot thread to finish
+            # ── Wait for the bot thread to finish (up to 10s) ──────────────────
             if self.bot_thread and self.bot_thread.is_alive():
-                logger.info("Waiting for bot thread to finish...")
-                self.bot_thread.join(timeout=5)  # Reduced timeout to prevent long freeze
-
-                # If still alive, just mark as stopped (don't force kill)
+                logger.info("Waiting for bot thread to stop…")
+                self.bot_thread.join(timeout=10)
                 if self.bot_thread.is_alive():
-                    logger.warning("Bot thread did not stop gracefully within timeout, marking as stopped")
+                    logger.warning("Bot thread still alive after 10s — marking stopped anyway")
 
-            # Clean up
+            # ── Extra safety delay so Telegram releases the getUpdates slot ────
+            import time
+            time.sleep(1)
+
             self.bot_instance = None
             self.bot_thread = None
             logger.info("Telegram bot stopped")
@@ -148,11 +151,10 @@ class TelegramBotManager:
 
         except Exception as e:
             logger.error(f"Failed to stop Telegram bot: {e}")
-            # Always mark as stopped to prevent stuck state
             self.is_running = False
             self.bot_instance = None
             self.bot_thread = None
-            return True  # Return True to indicate we've handled the stop request
+            return True
 
     def _run_bot(self) -> None:
         """Run the Telegram bot in a separate thread."""

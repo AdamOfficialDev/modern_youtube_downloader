@@ -2,8 +2,20 @@
   {
     "user_id": 1231244287,
     "username": "adamreal",
-    "download_count": 1,
-    "status": "Aktif",
-    "last_activity": "2026-03-07T20:04:41.369846"
+    "first_name": "Adam",
+    "status": "active",
+    "download_count": 2,
+    "total_bytes": 0,
+    "joined_at": "2026-03-09T07:19:21.307075",
+    "last_activity": "2026-03-09T13:00:43.070263",
+    "ban_reason": null,
+    "ban_until": null,
+    "preferences": {
+      "quality": "best",
+      "audio_format": "mp3",
+      "audio_quality": "192",
+      "auto_send_as_doc": false,
+      "notification_on_complete": true
+    }
   }
 ]

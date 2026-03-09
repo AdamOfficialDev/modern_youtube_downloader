@@ -466,7 +466,7 @@ class TelegramBotTab:
         token_row.addWidget(self.show_token_btn)
         lay.addLayout(token_row)
 
-        # Admin users field
+        # Admin Usernames field
         admin_lbl = QLabel("Admin Usernames  <span style='font-size:11px; "
                            f"color:{Palette.TEXT_MUTED};'>(comma-separated, no @)</span>")
         admin_lbl.setTextFormat(Qt.TextFormat.RichText)
@@ -478,6 +478,33 @@ class TelegramBotTab:
         self.admin_input.setMinimumHeight(38)
         self.admin_input.setStyleSheet(_input_style())
         lay.addWidget(self.admin_input)
+
+        # Admin User IDs field (preferred — ID-based, more secure than username)
+        admin_id_lbl = QLabel(
+            "Admin User IDs  <span style='font-size:11px; "
+            f"color:{Palette.TEXT_MUTED};'>(numeric IDs, comma-separated — "
+            f"<a style='color:{Palette.ACCENT}; text-decoration:none;' "
+            f"href='https://t.me/userinfobot'>get your ID →</a>)</span>"
+        )
+        admin_id_lbl.setTextFormat(Qt.TextFormat.RichText)
+        admin_id_lbl.setOpenExternalLinks(True)
+        admin_id_lbl.setStyleSheet(_label_style(12, "600", Palette.TEXT_SECONDARY))
+        lay.addWidget(admin_id_lbl)
+
+        self.admin_id_input = QLineEdit()
+        self.admin_id_input.setPlaceholderText("123456789, 987654321, …")
+        self.admin_id_input.setMinimumHeight(38)
+        self.admin_id_input.setStyleSheet(_input_style())
+        lay.addWidget(self.admin_id_input)
+
+        # Info note about ID vs username
+        id_note = QLabel(
+            f"<span style='color:{Palette.SUCCESS}; font-size:11px;'>✓ User ID</span>"
+            f"<span style='color:{Palette.TEXT_MUTED}; font-size:11px;'> lebih aman — tidak berubah meskipun username diganti</span>"
+        )
+        id_note.setTextFormat(Qt.TextFormat.RichText)
+        id_note.setStyleSheet("background:transparent; border:none;")
+        lay.addWidget(id_note)
 
         # Save button
         save_btn = QPushButton("💾  Save Configuration")
@@ -706,8 +733,16 @@ class TelegramBotTab:
         try:
             config = self.parent.config
             self.token_input.setText(config.get("telegram_bot_token", ""))
+
+            # Load admin usernames (legacy)
             admins = config.get("admin_users", [])
             self.admin_input.setText(", ".join(admins) if isinstance(admins, list) else str(admins))
+
+            # Load admin user IDs (preferred)
+            admin_ids = config.get("admin_user_ids", [])
+            self.admin_id_input.setText(
+                ", ".join(str(i) for i in admin_ids) if isinstance(admin_ids, list) else str(admin_ids)
+            )
             self.update_bot_status()
         except Exception as e:
             print(f"Error loading bot settings: {e}")
@@ -715,10 +750,35 @@ class TelegramBotTab:
     def save_bot_config(self):
         try:
             token = self.token_input.text().strip()
+
+            # Admin usernames (legacy)
             admin_text = self.admin_input.text().strip()
             admins = [u.strip().lstrip("@") for u in admin_text.split(",") if u.strip()] if admin_text else []
+
+            # Admin user IDs (preferred) — parse as integers, skip invalid
+            admin_id_text = self.admin_id_input.text().strip()
+            admin_ids = []
+            invalid_ids = []
+            for part in admin_id_text.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    admin_ids.append(int(part))
+                except ValueError:
+                    invalid_ids.append(part)
+
+            if invalid_ids:
+                QMessageBox.warning(
+                    self.parent, "Invalid User IDs",
+                    "ID berikut bukan angka dan diabaikan:\n"
+                    + ", ".join(invalid_ids)
+                    + "\n\nUser ID harus berupa angka, contoh: 123456789"
+                )
+
             self.parent.config["telegram_bot_token"] = token
             self.parent.config["admin_users"] = admins
+            self.parent.config["admin_user_ids"] = admin_ids
             self.parent.save_config()
             self._toast("Configuration saved ✓", Palette.SUCCESS)
         except Exception as e:
@@ -729,8 +789,18 @@ class TelegramBotTab:
             token = self.token_input.text().strip()
             admin_text = self.admin_input.text().strip()
             admins = [u.strip().lstrip("@") for u in admin_text.split(",") if u.strip()] if admin_text else []
+            admin_id_text = self.admin_id_input.text().strip()
+            admin_ids = []
+            for part in admin_id_text.split(","):
+                part = part.strip()
+                try:
+                    if part:
+                        admin_ids.append(int(part))
+                except ValueError:
+                    pass
             self.parent.config["telegram_bot_token"] = token
             self.parent.config["admin_users"] = admins
+            self.parent.config["admin_user_ids"] = admin_ids
             self.parent.save_config()
         except Exception as e:
             print(f"Error saving bot config silently: {e}")

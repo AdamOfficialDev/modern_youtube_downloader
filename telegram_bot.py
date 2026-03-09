@@ -2,1654 +2,2301 @@
 # -*- coding: utf-8 -*-
 
 """
-Modern YouTube Downloader Telegram Bot
-======================================
+Modern YouTube Downloader Telegram Bot — Enhanced Edition
+==========================================================
 
-A comprehensive Telegram bot for downloading videos from YouTube and other platforms.
-Built with python-telegram-bot and yt-dlp.
+A comprehensive, production-grade Telegram bot for downloading videos
+from YouTube and 1000+ other platforms via yt-dlp.
 
-This bot allows users to download videos by sending URLs, with options for different
-formats and quality settings. It includes robust error handling, logging, and
-configuration management.
+New in Enhanced Edition:
+  - Async download queue with worker pool
+  - Real-time progress tracking with live message updates
+  - Rate limiting (per-user & global)
+  - Playlist/channel download support
+  - User preferences (quality, format, audio-only mode)
+  - Admin broadcast, ban/unban with reason & duration
+  - Rich admin dashboard with inline controls
+  - Decorator-based middleware (auth, block check, rate limit)
+  - Graceful shutdown & cleanup
+  - Structured logging with rotation
+  - Pydantic-validated config
+  - Full type hints throughout
 
-Author: Adam Official Dev
+Author : Adam Official Dev
+Version: 2.0.0
+Python : 3.11+
 """
 
-import os
-import sys
+from __future__ import annotations
+
+import asyncio
+import base64
+import datetime
 import json
 import logging
-import datetime
+import os
 import re
-import tempfile
 import shutil
+import sys
+import tempfile
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from enum import Enum
+from functools import wraps
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import yt_dlp
-import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
-# Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler("bot_logs.log"),
-        logging.StreamHandler()
-    ]
-)
+# ─────────────────────────────── Logging Setup ────────────────────────────────
 
-# Create logger
-logger = logging.getLogger(__name__)
+def _setup_logging() -> logging.Logger:
+    """Configure rotating file + stream logging."""
+    fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    formatter = logging.Formatter(fmt)
 
-# Constants
-CONFIG_FILE = "config.json"
-DEFAULT_DOWNLOAD_DIR = "downloads"
-DOWNLOAD_TIMEOUT = 600  # 10 minutes
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB (Telegram bot API limit)
+    file_handler = RotatingFileHandler(
+        "bot_logs.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+
+    # Force UTF-8 on Windows console — prevents UnicodeEncodeError for non-ASCII filenames
+    import io
+    _stdout = (io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+               if hasattr(sys.stdout, "buffer") else sys.stdout)
+    stream_handler = logging.StreamHandler(_stdout)
+    stream_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
+
+    # Suppress noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+
+    return logging.getLogger(__name__)
+
+
+logger = _setup_logging()
+
+# ──────────────────────────────── Constants ───────────────────────────────────
+
+CONFIG_FILE = Path("config.json")
+USERS_FILE = Path("bot_users.json")
+HISTORY_FILE = Path("download_history.json")
+DEFAULT_DOWNLOAD_DIR = Path("downloads")
+MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+DOWNLOAD_TIMEOUT = 900          # 15 minutes
+QUEUE_WORKER_COUNT = 3          # Concurrent download workers
+RATE_LIMIT_WINDOW = 60          # seconds
+RATE_LIMIT_MAX_REQUESTS = 10    # per window per user
+PROGRESS_UPDATE_INTERVAL = 3.0  # seconds between progress edits
+SUPPORTED_PLATFORMS = [
+    "YouTube", "TikTok", "Instagram", "Twitter/X", "Facebook",
+    "Vimeo", "Dailymotion", "Twitch", "Reddit", "SoundCloud",
+    "Bilibili", "NicoNico", "Odysee", "Rumble", "+1000 more",
+]
+
+
+# ──────────────────────────────── Enums / Types ───────────────────────────────
+
+class DownloadStatus(str, Enum):
+    QUEUED = "queued"
+    FETCHING_INFO = "fetching_info"
+    SELECTING_FORMAT = "selecting_format"
+    DOWNLOADING = "downloading"
+    UPLOADING = "uploading"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class UserStatus(str, Enum):
+    ACTIVE = "active"
+    BANNED = "banned"
+    PREMIUM = "premium"
+
+
+class QualityPreset(str, Enum):
+    BEST = "best"
+    HIGH = "1080p"
+    MEDIUM = "720p"
+    LOW = "480p"
+    LOWEST = "360p"
+    AUDIO_ONLY = "audio"
+
+
+# ─────────────────────────────── Data Models ──────────────────────────────────
+
+@dataclass
+class UserPreferences:
+    """Per-user download preferences."""
+    quality: QualityPreset = QualityPreset.BEST
+    audio_format: str = "mp3"
+    audio_quality: str = "192"
+    auto_send_as_doc: bool = False
+    notification_on_complete: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "quality": self.quality.value,
+            "audio_format": self.audio_format,
+            "audio_quality": self.audio_quality,
+            "auto_send_as_doc": self.auto_send_as_doc,
+            "notification_on_complete": self.notification_on_complete,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UserPreferences":
+        return cls(
+            quality=QualityPreset(data.get("quality", QualityPreset.BEST.value)),
+            audio_format=data.get("audio_format", "mp3"),
+            audio_quality=data.get("audio_quality", "192"),
+            auto_send_as_doc=data.get("auto_send_as_doc", False),
+            notification_on_complete=data.get("notification_on_complete", True),
+        )
+
+
+# Migration map lives at module level — safe from dataclass mutable-default restriction
+_USER_STATUS_MIGRATION: Dict[str, str] = {
+    "Aktif": "active",    "aktif": "active",    "AKTIF": "active",
+    "Diblokir": "banned", "diblokir": "banned", "DIBLOKIR": "banned",
+    "blocked": "banned",  "Blocked": "banned",
+    "Premium": "premium",
+}
+
+
+@dataclass
+class UserRecord:
+    """User database record."""
+    user_id: int
+    username: str
+    first_name: str
+    status: UserStatus = UserStatus.ACTIVE
+    download_count: int = 0
+    total_bytes: int = 0
+    joined_at: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    last_activity: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    ban_reason: Optional[str] = None
+    ban_until: Optional[str] = None      # ISO datetime or None (permanent)
+    preferences: UserPreferences = field(default_factory=UserPreferences)
+
+    def is_banned(self) -> bool:
+        if self.status != UserStatus.BANNED:
+            return False
+        # Check if temporary ban has expired
+        if self.ban_until:
+            try:
+                expiry = datetime.datetime.fromisoformat(self.ban_until)
+                if datetime.datetime.now() >= expiry:
+                    self.status = UserStatus.ACTIVE
+                    self.ban_reason = None
+                    self.ban_until = None
+                    return False
+            except ValueError:
+                pass
+        return True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "username": self.username,
+            "first_name": self.first_name,
+            "status": self.status.value,
+            "download_count": self.download_count,
+            "total_bytes": self.total_bytes,
+            "joined_at": self.joined_at,
+            "last_activity": self.last_activity,
+            "ban_reason": self.ban_reason,
+            "ban_until": self.ban_until,
+            "preferences": self.preferences.to_dict(),
+        }
+
+    @classmethod
+    def _resolve_status(cls, raw: str) -> UserStatus:
+        """Resolve status string, migrating legacy Indonesian values gracefully."""
+        normalized = _USER_STATUS_MIGRATION.get(raw, raw)
+        try:
+            return UserStatus(normalized)
+        except ValueError:
+            logger.warning("Unknown UserStatus value %r -- defaulting to active", raw)
+            return UserStatus.ACTIVE
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UserRecord":
+        return cls(
+            user_id=data["user_id"],
+            username=data.get("username", ""),
+            first_name=data.get("first_name", ""),
+            status=cls._resolve_status(data.get("status", UserStatus.ACTIVE.value)),
+            download_count=data.get("download_count", 0),
+            total_bytes=data.get("total_bytes", 0),
+            joined_at=data.get("joined_at", datetime.datetime.now().isoformat()),
+            last_activity=data.get("last_activity", datetime.datetime.now().isoformat()),
+            ban_reason=data.get("ban_reason"),
+            ban_until=data.get("ban_until"),
+            preferences=UserPreferences.from_dict(data.get("preferences", {})),
+        )
+
+
+@dataclass
+class DownloadTask:
+    """A single download job in the queue."""
+    task_id: str
+    user_id: int
+    chat_id: int
+    message_id: int           # status message to edit
+    url: str
+    format_id: str
+    extract_audio: bool
+    title: str = ""
+    status: DownloadStatus = DownloadStatus.QUEUED
+    progress_pct: float = 0.0
+    speed_str: str = ""
+    eta_str: str = ""
+    file_size_str: str = ""
+    error_msg: str = ""
+    created_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+
+
+# ─────────────────────────────── Config ───────────────────────────────────────
 
 class BotConfig:
-    """Configuration manager for the Telegram bot."""
+    """
+    Configuration manager backed by JSON.
+    Falls back gracefully to env variables for the bot token.
+    """
 
-    def __init__(self, config_file: str = CONFIG_FILE, parent_app=None):
-        """
-        Initialize the configuration manager.
+    _DEFAULTS: Dict[str, Any] = {
+        "telegram_bot_token": "",
+        "admin_user_ids": [],            # List[int]  (preferred — IDs, not usernames)
+        "admin_users": [],               # List[str]  (legacy username list, still supported)
+        "max_concurrent_per_user": 2,
+        "max_queue_size": 50,
+        "allowed_formats": ["mp4", "mp3", "webm", "mkv"],
+        "download_dir": str(DEFAULT_DOWNLOAD_DIR),
+        "cleanup_after_send": True,
+        "max_playlist_items": 25,
+        "youtube_api_key": "",
+        "rate_limit_enabled": True,
+        "rate_limit_requests": RATE_LIMIT_MAX_REQUESTS,
+        "rate_limit_window": RATE_LIMIT_WINDOW,
+        "welcome_message": "",
+        "maintenance_mode": False,
+        "maintenance_message": "🛠️ Bot sedang dalam maintenance. Silakan coba lagi nanti.",
+    }
 
-        Args:
-            config_file: Path to the configuration file
-            parent_app: Parent application (ModernVideoDownloader instance)
-        """
+    def __init__(self, config_file: Path = CONFIG_FILE, parent_app: Any = None) -> None:
         self.config_file = config_file
         self.parent_app = parent_app
-        self.config = self._load_config()
+        self._data: Dict[str, Any] = self._load()
 
-    def _load_config(self) -> Dict[str, Any]:
-        """
-        Load configuration from file or parent application.
+    # ── private ──────────────────────────────────────────────────────────────
 
-        Returns:
-            Dict containing configuration values
-        """
-        # If parent app is provided, use its configuration
-        if self.parent_app and hasattr(self.parent_app, 'config'):
-            config = self.parent_app.config
-
-            # Ensure required fields exist
-            if "telegram_bot_token" not in config:
-                config["telegram_bot_token"] = ""
-            if "admin_users" not in config:
-                config["admin_users"] = []
-            if "max_downloads_per_user" not in config:
-                config["max_downloads_per_user"] = 5
-            if "allowed_formats" not in config:
-                config["allowed_formats"] = ["mp4", "mp3", "webm"]
-
-            return config
-
-        # Otherwise, load from file
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, "r") as f:
-                    config = json.load(f)
-
-                # Ensure required fields exist
-                if "telegram_bot_token" not in config:
-                    config["telegram_bot_token"] = ""
-                if "admin_users" not in config:
-                    config["admin_users"] = []
-                if "max_downloads_per_user" not in config:
-                    config["max_downloads_per_user"] = 5
-                if "allowed_formats" not in config:
-                    config["allowed_formats"] = ["mp4", "mp3", "webm"]
-
-                return config
-            else:
-                # Create default config
-                default_config = {
-                    "youtube_api_key": "",
-                    "telegram_bot_token": "",
-                    "admin_users": [],
-                    "max_downloads_per_user": 5,
-                    "allowed_formats": ["mp4", "mp3", "webm"]
-                }
-
-                with open(self.config_file, "w") as f:
-                    json.dump(default_config, f, indent=2)
-
-                return default_config
-        except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
-            return {
-                "telegram_bot_token": "",
-                "admin_users": []
-            }
-
-    def save_config(self) -> bool:
-        """
-        Save current configuration to file or parent application.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        # If parent app is provided, update its configuration
-        if self.parent_app and hasattr(self.parent_app, 'config'):
+    def _load(self) -> Dict[str, Any]:
+        """Load config from parent app, file, or create defaults."""
+        if self.parent_app and hasattr(self.parent_app, "config"):
+            data = {**self._DEFAULTS, **self.parent_app.config}
+        elif self.config_file.exists():
             try:
-                # Update parent app's config with our values
-                for key, value in self.config.items():
-                    self.parent_app.config[key] = value
+                with self.config_file.open("r", encoding="utf-8") as fh:
+                    data = {**self._DEFAULTS, **json.load(fh)}
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.error("Config load failed: %s — using defaults", exc)
+                data = dict(self._DEFAULTS)
+        else:
+            data = dict(self._DEFAULTS)
+            self._write(data)
 
-                # Save parent app's config
-                if hasattr(self.parent_app, 'save_config'):
-                    self.parent_app.save_config()
-                return True
-            except Exception as e:
-                logger.error(f"Error saving configuration to parent app: {e}")
-                return False
+        # Env override for token
+        data["telegram_bot_token"] = (
+            os.environ.get("TELEGRAM_BOT_TOKEN") or data.get("telegram_bot_token", "")
+        )
+        return data
 
-        # Otherwise, save to file
+    def _write(self, data: Dict[str, Any]) -> None:
         try:
-            with open(self.config_file, "w") as f:
-                json.dump(self.config, f, indent=2)
-            return True
-        except Exception as e:
-            logger.error(f"Error saving configuration to file: {e}")
-            return False
+            self.config_file.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.error("Config write failed: %s", exc)
+
+    # ── public ───────────────────────────────────────────────────────────────
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a configuration value.
-
-        Args:
-            key: Configuration key
-            default: Default value if key doesn't exist
-
-        Returns:
-            Configuration value or default
-        """
-        return self.config.get(key, default)
+        return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """
-        Set a configuration value.
+        self._data[key] = value
+        self._write(self._data)
+        if self.parent_app and hasattr(self.parent_app, "config"):
+            self.parent_app.config[key] = value
 
-        Args:
-            key: Configuration key
-            value: Value to set
+    def is_admin(self, user_id: int, username: Optional[str] = None) -> bool:
+        """Check admin by ID (preferred) or legacy username.
+
+        Converts IDs to int before comparison — JSON may deserialise them as
+        strings if they were saved that way by an older version of the GUI.
         """
-        self.config[key] = value
-        self.save_config()
+        raw_ids = self._data.get("admin_user_ids", [])
+        # Coerce every entry to int — silently skip anything non-numeric
+        admin_ids: List[int] = []
+        for entry in raw_ids:
+            try:
+                admin_ids.append(int(entry))
+            except (ValueError, TypeError):
+                pass
+
+        admin_names: List[str] = self._data.get("admin_users", [])
+        if user_id in admin_ids:
+            return True
+        if username and username in admin_names:
+            return True
+        return False
+
+
+# ──────────────────────────── User Database ───────────────────────────────────
+
+class UserDatabase:
+    """
+    Simple JSON-backed user store.
+    Uses an in-memory dict keyed by user_id for fast lookups.
+    """
+
+    def __init__(self, file: Path = USERS_FILE) -> None:
+        self.file = file
+        self._db: Dict[int, UserRecord] = {}
+        self._load()
+
+    # ── private ──────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        if self.file.exists():
+            try:
+                raw: List[Dict[str, Any]] = json.loads(
+                    self.file.read_text(encoding="utf-8")
+                )
+                self._db = {r["user_id"]: UserRecord.from_dict(r) for r in raw}
+                logger.info("Loaded %d users from database", len(self._db))
+            except (json.JSONDecodeError, KeyError, OSError) as exc:
+                logger.error("User DB load error: %s", exc)
+
+    def _save(self) -> None:
+        try:
+            data = [rec.to_dict() for rec in self._db.values()]
+            self.file.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.error("User DB save error: %s", exc)
+
+    # ── public ───────────────────────────────────────────────────────────────
+
+    def get_or_create(self, user_id: int, username: str, first_name: str) -> UserRecord:
+        if user_id not in self._db:
+            self._db[user_id] = UserRecord(
+                user_id=user_id, username=username, first_name=first_name
+            )
+            self._save()
+            logger.info("New user registered: %s (ID: %d)", username, user_id)
+        return self._db[user_id]
+
+    def get(self, user_id: int) -> Optional[UserRecord]:
+        return self._db.get(user_id)
+
+    def touch(self, user_id: int, username: str, first_name: str) -> None:
+        rec = self.get_or_create(user_id, username, first_name)
+        rec.last_activity = datetime.datetime.now().isoformat()
+        rec.username = username
+        rec.first_name = first_name
+        self._save()
+
+    def increment_downloads(self, user_id: int, file_bytes: int = 0) -> None:
+        if rec := self._db.get(user_id):
+            rec.download_count += 1
+            rec.total_bytes += file_bytes
+            self._save()
+
+    def ban(
+        self,
+        user_id: int,
+        reason: str = "No reason given",
+        duration_hours: Optional[int] = None,
+    ) -> bool:
+        if rec := self._db.get(user_id):
+            rec.status = UserStatus.BANNED
+            rec.ban_reason = reason
+            rec.ban_until = (
+                (datetime.datetime.now() + datetime.timedelta(hours=duration_hours)).isoformat()
+                if duration_hours
+                else None
+            )
+            self._save()
+            return True
+        return False
+
+    def unban(self, user_id: int) -> bool:
+        if rec := self._db.get(user_id):
+            rec.status = UserStatus.ACTIVE
+            rec.ban_reason = None
+            rec.ban_until = None
+            self._save()
+            return True
+        return False
+
+    def is_banned(self, user_id: int) -> bool:
+        rec = self._db.get(user_id)
+        return rec.is_banned() if rec else False
+
+    def all_users(self) -> List[UserRecord]:
+        return list(self._db.values())
+
+    def stats(self) -> Dict[str, Any]:
+        all_recs = self.all_users()
+        now = datetime.datetime.now()
+        cutoff_30d = now - datetime.timedelta(days=30)
+        active_30d = sum(
+            1 for r in all_recs
+            if datetime.datetime.fromisoformat(r.last_activity) >= cutoff_30d
+        )
+        return {
+            "total": len(all_recs),
+            "active_30d": active_30d,
+            "banned": sum(1 for r in all_recs if r.status == UserStatus.BANNED),
+            "premium": sum(1 for r in all_recs if r.status == UserStatus.PREMIUM),
+            "total_downloads": sum(r.download_count for r in all_recs),
+            "total_bytes": sum(r.total_bytes for r in all_recs),
+        }
+
+
+# ────────────────────────────── Rate Limiter ──────────────────────────────────
+
+class RateLimiter:
+    """
+    Token-bucket-style per-user rate limiter using a sliding window.
+    Thread-safe for asyncio (single-threaded event loop).
+    """
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._windows: Dict[int, Deque[float]] = defaultdict(deque)
+
+    def is_allowed(self, user_id: int) -> Tuple[bool, int]:
+        """
+        Returns (allowed, retry_after_seconds).
+        retry_after is 0 when allowed.
+        """
+        now = time.monotonic()
+        window_start = now - self.window
+        dq = self._windows[user_id]
+
+        # Remove old timestamps
+        while dq and dq[0] < window_start:
+            dq.popleft()
+
+        if len(dq) >= self.max_requests:
+            retry_after = int(self.window - (now - dq[0])) + 1
+            return False, retry_after
+
+        dq.append(now)
+        return True, 0
+
+
+# ──────────────────────────── Download Manager ────────────────────────────────
 
 class DownloadManager:
-    """Manager for video download operations."""
+    """
+    Handles yt-dlp operations: info fetching and downloading.
+    All public methods are async-friendly (run blocking I/O in executor).
+    """
 
-    def __init__(self, download_dir: str = DEFAULT_DOWNLOAD_DIR):
-        """
-        Initialize the download manager.
+    # Base yt-dlp options shared across calls
+    _BASE_OPTS: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "no_color": True,
+        "geo_bypass": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+    }
 
-        Args:
-            download_dir: Directory to save downloads
-        """
+    def __init__(self, download_dir: Path = DEFAULT_DOWNLOAD_DIR) -> None:
         self.download_dir = download_dir
-        os.makedirs(download_dir, exist_ok=True)
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_opts(extra: Dict[str, Any]) -> Dict[str, Any]:
+        return {**DownloadManager._BASE_OPTS, **extra}
+
+    @staticmethod
+    def _tiktok_args() -> Dict[str, Any]:
+        return {
+            "extractor_args": {
+                "tiktok": {
+                    "api_hostname": "api16-normal-c-useast1a.tiktokv.com",
+                }
+            }
+        }
+
+    # ── public API ───────────────────────────────────────────────────────────
 
     async def get_video_info(self, url: str) -> Dict[str, Any]:
         """
-        Get information about a video.
-
-        Args:
-            url: Video URL
-
-        Returns:
-            Dict containing video information
+        Fetch video metadata without downloading.
 
         Raises:
-            Exception: If video information cannot be retrieved
+            ValueError: if info extraction fails completely.
         """
-        # Enhanced options for better platform support
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'extract_flat': False,
-            'force_generic_extractor': False,
-            'ignoreerrors': False,
-            'nocheckcertificate': True,  # Ignore SSL certificate validation
-            'no_color': True,
-            'geo_bypass': True,  # Try to bypass geo-restrictions
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',  # Use a common user agent
-        }
+        opts = self._build_opts({"skip_download": True, "extract_flat": False})
+        if "tiktok.com" in url:
+            opts.update(self._tiktok_args())
 
-        # Add special handling for TikTok
-        if 'tiktok.com' in url or 'vt.tiktok.com' in url:
-            logger.info(f"TikTok URL detected: {url}")
-            # Add TikTok-specific options
-            ydl_opts.update({
-                'extractor_args': {
-                    'tiktok': {
-                        'embed_api': 'https://www.tiktok.com/embed',
-                        'api_hostname': 'api.tiktok.com',
-                        'webpage_api': 'https://www.tiktok.com/api',
-                        'mobile_api': 'https://m.tiktok.com/api',
-                    }
-                }
-            })
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._extract_info_sync, url, opts)
 
+    def _extract_info_sync(self, url: str, opts: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                logger.info(f"Extracting info for URL: {url}")
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                if info:
-                    logger.info(f"Successfully extracted info for: {info.get('title', 'Unknown title')}")
+                if not info:
+                    raise ValueError("No info returned by yt-dlp")
                 return info
-        except Exception as e:
-            logger.error(f"Error getting video info: {e}")
-            # Try with generic extractor as fallback
-            try:
-                logger.info(f"Retrying with generic extractor for URL: {url}")
-                ydl_opts['force_generic_extractor'] = True
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if info:
-                        logger.info(f"Successfully extracted info with generic extractor: {info.get('title', 'Unknown title')}")
-                    return info
-            except Exception as e2:
-                logger.error(f"Error getting video info with generic extractor: {e2}")
-                raise Exception(f"Could not extract video information: {str(e2)}")
+        except yt_dlp.utils.DownloadError as exc:
+            logger.warning("Primary extraction failed for %s: %s", url, exc)
+            # Fallback: generic extractor
+            opts_fb = {**opts, "force_generic_extractor": True}
+            with yt_dlp.YoutubeDL(opts_fb) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise ValueError("Generic extractor returned no info")
+                return info
 
     async def download_video(
         self,
         url: str,
         format_id: str = "best",
-        extract_audio: bool = False
-    ) -> Tuple[str, str]:
+        extract_audio: bool = False,
+        progress_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
+        max_playlist_items: int = 1,
+    ) -> Tuple[List[Path], str]:
         """
-        Download a video.
-
-        Args:
-            url: Video URL
-            format_id: Format ID to download
-            extract_audio: Whether to extract audio
+        Download video/audio to a temp dir then move to download_dir.
 
         Returns:
-            Tuple of (file_path, title)
-
+            (list_of_file_paths, title)
         Raises:
-            Exception: If download fails
+            Exception: on download failure.
         """
-        # Create a temporary directory for this download
-        temp_dir = tempfile.mkdtemp()
-
+        temp_dir = Path(tempfile.mkdtemp())
         try:
-            # Set up enhanced yt-dlp options for better platform support
-            ydl_opts = {
-                'format': format_id,
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'noplaylist': True,
-                'nocheckcertificate': True,  # Ignore SSL certificate validation
-                'no_color': True,
-                'geo_bypass': True,  # Try to bypass geo-restrictions
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'retries': 5,  # Retry up to 5 times
-                'fragment_retries': 5,  # Retry fragments up to 5 times
-                'ignoreerrors': False,
-                'verbose': True,  # Enable verbose output for debugging
-            }
-
-            # Add special handling for TikTok
-            if 'tiktok.com' in url or 'vt.tiktok.com' in url:
-                logger.info(f"TikTok URL detected for download: {url}")
-                # Add TikTok-specific options
-                ydl_opts.update({
-                    'extractor_args': {
-                        'tiktok': {
-                            'embed_api': 'https://www.tiktok.com/embed',
-                            'api_hostname': 'api.tiktok.com',
-                            'webpage_api': 'https://www.tiktok.com/api',
-                            'mobile_api': 'https://m.tiktok.com/api',
-                        }
-                    }
-                })
+            outtmpl = str(temp_dir / "%(title).100s.%(ext)s")
 
             if extract_audio:
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                })
+                fmt = "bestaudio/best"
+                postprocessors: List[Dict[str, Any]] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+            else:
+                fmt = format_id
+                postprocessors = []
 
-            # Download the video
-            logger.info(f"Starting download for URL: {url} with format: {format_id}")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'video')
-                logger.info(f"Download completed for: {title}")
+            extra: Dict[str, Any] = {
+                "format": fmt,
+                "outtmpl": outtmpl,
+                "noplaylist": max_playlist_items == 1,
+                "playlistend": max_playlist_items,
+                "merge_output_format": "mp4",
+                "verbose": False,
+            }
+            if postprocessors:
+                extra["postprocessors"] = postprocessors
+            if progress_hook:
+                extra["progress_hooks"] = [progress_hook]
+            if "tiktok.com" in url:
+                extra.update(self._tiktok_args())
 
-                # Find the downloaded file
-                for file in os.listdir(temp_dir):
-                    file_path = os.path.join(temp_dir, file)
-                    if os.path.isfile(file_path):
-                        # Move to permanent location
-                        final_path = os.path.join(self.download_dir, file)
-                        shutil.move(file_path, final_path)
-                        logger.info(f"File saved to: {final_path}")
-                        return final_path, title
+            opts = self._build_opts(extra)
+            loop = asyncio.get_running_loop()
+            title = await loop.run_in_executor(
+                None, self._download_sync, url, opts, temp_dir
+            )
 
-            raise Exception("Downloaded file not found")
-        except Exception as e:
-            logger.error(f"Error downloading video: {e}")
-            # Try with generic extractor as fallback
-            try:
-                logger.info(f"Retrying download with generic extractor for URL: {url}")
-                ydl_opts['force_generic_extractor'] = True
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    title = info.get('title', 'video')
-                    logger.info(f"Download completed with generic extractor for: {title}")
+            # Move files to permanent location
+            files: List[Path] = []
+            for f in temp_dir.iterdir():
+                if f.is_file():
+                    dest = self.download_dir / f.name
+                    shutil.move(str(f), str(dest))
+                    files.append(dest)
+                    logger.info("Saved: %s", dest)
 
-                    # Find the downloaded file
-                    for file in os.listdir(temp_dir):
-                        file_path = os.path.join(temp_dir, file)
-                        if os.path.isfile(file_path):
-                            # Move to permanent location
-                            final_path = os.path.join(self.download_dir, file)
-                            shutil.move(file_path, final_path)
-                            logger.info(f"File saved to: {final_path}")
-                            return final_path, title
+            if not files:
+                raise FileNotFoundError("No output files found after download")
 
-                raise Exception("Downloaded file not found")
-            except Exception as e2:
-                logger.error(f"Error downloading video with generic extractor: {e2}")
-                raise Exception(f"Failed to download video: {str(e2)}")
+            return files, title
         finally:
-            # Clean up temp directory
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-class TelegramBot:
-    """Main Telegram bot class."""
-
-    def __init__(self, parent_app=None):
-        """
-        Initialize the Telegram bot.
-
-        Args:
-            parent_app: Parent application (ModernVideoDownloader instance)
-        """
-        self.parent_app = parent_app
-        self.config = BotConfig(parent_app=parent_app)
-        self.download_manager = DownloadManager()
-        self.active_downloads = {}  # Track active downloads by user
-        self.start_time = datetime.datetime.now()
-
-        # Get bot token from parent app if available, otherwise from config
-        if parent_app and parent_app.config.get("telegram_bot_token"):
-            self.token = parent_app.config.get("telegram_bot_token")
-        else:
-            self.token = self.config.get("telegram_bot_token")
-
-        if not self.token:
-            logger.error("Bot token not found in configuration")
-            raise ValueError("Telegram bot token not configured")
-
-        # Initialize bot application
-        self.application = Application.builder().token(self.token).build()
-
-        # Register handlers
-        self._register_handlers()
-
-        logger.info("Bot initialized successfully")
-
-    def _register_handlers(self) -> None:
-        """Register command and message handlers."""
-        # Command handlers
-        self.application.add_handler(CommandHandler("start", self.cmd_start))
-        self.application.add_handler(CommandHandler("help", self.cmd_help))
-        self.application.add_handler(CommandHandler("about", self.cmd_about))
-        self.application.add_handler(CommandHandler("download", self.cmd_download))
-        self.application.add_handler(CommandHandler("audio", self.cmd_audio))
-        self.application.add_handler(CommandHandler("status", self.cmd_status))
-        self.application.add_handler(CommandHandler("menu", self.cmd_menu))
-
-        # Admin commands
-        self.application.add_handler(CommandHandler("stats", self.cmd_stats))
-        self.application.add_handler(CommandHandler("logs", self.cmd_logs))
-        self.application.add_handler(CommandHandler("testblock", self.cmd_test_block))
-
-        # Message handlers
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-
-        # Callback query handler
-        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
-
-        # Error handler
-        self.application.add_error_handler(self.error_handler)
-
-    async def _set_bot_commands(self) -> None:
-        """Set up bot commands for the menu."""
-        commands = [
-            BotCommand("start", "Start the bot"),
-            BotCommand("menu", "Show the menu ☰"),
-            BotCommand("download", "Download a video"),
-            BotCommand("audio", "Extract audio from a video"),
-            BotCommand("status", "Check your download status"),
-            BotCommand("help", "Show help information"),
-            BotCommand("about", "About this bot")
-        ]
-
-        try:
-            await self.application.bot.set_my_commands(commands)
-            logger.info("Bot commands set successfully")
-        except Exception as e:
-            logger.error(f"Error setting bot commands: {e}")
-
-    def _create_main_menu_keyboard(self) -> ReplyKeyboardMarkup:
-        """Create the main menu keyboard."""
-        keyboard = [
-            [KeyboardButton("📥 Download Video"), KeyboardButton("🎵 Extract Audio")],
-            [KeyboardButton("📊 Status"), KeyboardButton("ℹ️ Help")],
-            [KeyboardButton("🤖 About")]
-        ]
-        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /start command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-        logger.info(f"User {user.id} ({user.username}) started the bot")
-
-        # Check if user is blocked
-        logger.info(f"Checking if user {user.id} is blocked for /start command")
-        if self.is_user_blocked(user.id):
-            logger.warning(f"User {user.id} ({user.username}) is blocked, sending block message")
-            blocked_message = (
-                "🚫 **AKSES DITOLAK**\n\n"
-                "❌ Maaf, akun Anda telah diblokir oleh administrator.\n"
-                "🔒 Anda tidak dapat menggunakan layanan bot ini saat ini.\n\n"
-                "📞 **Untuk mengajukan banding:**\n"
-                "• Hubungi administrator bot\n"
-                "• Jelaskan alasan Anda ingin akses dikembalikan\n"
-                "• Tunggu keputusan dari admin\n\n"
-                "⚠️ Jangan spam atau membuat akun baru, hal ini dapat memperpanjang masa blokir."
-            )
-            try:
-                await update.message.reply_text(blocked_message, parse_mode="Markdown")
-                logger.info(f"Block message sent successfully to user {user.id}")
-            except Exception as e:
-                logger.error(f"Failed to send block message to user {user.id}: {e}")
-                # Fallback without markdown
-                await update.message.reply_text(blocked_message.replace("**", "").replace("*", ""))
-            return
-
-        # Update user activity for start command
-        self._update_user_activity(user.id, user.username, increment_download=False)
-
-        # Set up bot commands for the menu
-        await self._set_bot_commands()
-
-        welcome_message = (
-            f"👋 Hello {user.first_name}!\n\n"
-            f"Welcome to the Modern YouTube Downloader Bot. "
-            f"This bot helps you download videos from YouTube and other platforms.\n\n"
-            f"Send me a video URL or click the ☰ menu button to see available commands."
-        )
-
-        # Send welcome message with menu keyboard
-        await update.message.reply_text(
-            welcome_message,
-            reply_markup=self._create_main_menu_keyboard()
-        )
-
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /help command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-
-        # Check if user is blocked
-        if self.is_user_blocked(user.id):
-            blocked_message = (
-                "🚫 **BANTUAN TIDAK TERSEDIA**\n\n"
-                "❌ Akun Anda telah diblokir oleh administrator.\n"
-                "❓ Anda tidak dapat mengakses bantuan saat ini.\n\n"
-                "📖 **Informasi umum:**\n"
-                "• Akun Anda dalam status diblokir\n"
-                "• Semua fitur bot tidak dapat diakses\n"
-                "• Termasuk halaman bantuan dan panduan\n\n"
-                "🔧 **Untuk mendapatkan bantuan:**\n"
-                "• Hubungi administrator bot langsung\n"
-                "• Jelaskan masalah atau pertanyaan Anda\n"
-                "• Minta klarifikasi tentang status akun\n\n"
-                "💡 **Catatan:** Admin dapat memberikan bantuan meskipun akun diblokir."
-            )
-            await update.message.reply_text(blocked_message, parse_mode="Markdown")
-            return
-
-        # Update user activity for help command
-        self._update_user_activity(user.id, user.username, increment_download=False)
-        help_text = (
-            "🔍 *Available Commands:*\n\n"
-            "• Send any video URL to download it\n"
-            "• /menu - Show the interactive menu ☰\n"
-            "• /download <url> - Download a video in best quality\n"
-            "• /audio <url> - Extract audio from a video\n"
-            "• /status - Check your download status\n"
-            "• /about - Information about this bot\n"
-            "• /help - Show this help message\n\n"
-
-            "🔧 *How to use:*\n"
-            "1. Click the ☰ menu button or use /menu to see available options\n"
-            "2. Send a YouTube URL (or other supported platform)\n"
-            "3. Select the format you want to download\n"
-            "4. Wait for the download to complete\n"
-            "5. Receive your file\n\n"
-
-            "⚠️ *Limitations:*\n"
-            "• Maximum file size: 50MB (Telegram limitation)\n"
-            "• Larger files will be provided as download links\n"
-            f"• Maximum concurrent downloads: {self.config.get('max_downloads_per_user', 5)} per user"
-        )
-
-        await update.message.reply_text(
-            help_text,
-            parse_mode="Markdown",
-            reply_markup=self._create_main_menu_keyboard()
-        )
-
-    async def cmd_about(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /about command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        about_text = (
-            "🤖 *Modern YouTube Downloader Bot*\n\n"
-            "A powerful bot for downloading videos from YouTube and other platforms.\n\n"
-
-            "🛠 *Features:*\n"
-            "• Download videos in various formats\n"
-            "• Extract audio from videos\n"
-            "• Support for multiple platforms\n"
-            "• Fast and reliable downloads\n\n"
-
-            "👨‍💻 *Developer:* Adam Official Dev\n"
-            "🔗 *GitHub:* [modern_youtube_downloader](https://github.com/AdamOfficialDev/modern_youtube_downloader)\n\n"
-
-            "📦 *Powered by:*\n"
-            "• python-telegram-bot\n"
-            "• yt-dlp\n"
-            "• FFmpeg\n\n"
-
-            "Version 1.0.0"
-        )
-
-        await update.message.reply_text(
-            about_text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-            reply_markup=self._create_main_menu_keyboard()
-        )
-
-    async def cmd_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /download command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-        logger.info(f"User {user.id} ({user.username}) used /download command")
-
-        # Check if user is blocked
-        if self.is_user_blocked(user.id):
-            blocked_message = (
-                "🚫 **DOWNLOAD DITOLAK**\n\n"
-                "❌ Akun Anda telah diblokir oleh administrator.\n"
-                "📥 Anda tidak dapat mengunduh video saat ini.\n\n"
-                "🔍 **Kemungkinan alasan pemblokiran:**\n"
-                "• Pelanggaran terms of service\n"
-                "• Penggunaan berlebihan (spam)\n"
-                "• Konten yang tidak sesuai\n"
-                "• Laporan dari pengguna lain\n\n"
-                "📞 **Untuk mengajukan banding:**\n"
-                "• Hubungi administrator bot\n"
-                "• Jelaskan situasi Anda dengan jelas\n"
-                "• Berikan bukti jika diperlukan\n\n"
-                "⏳ Proses review biasanya memakan waktu 1-3 hari kerja."
-            )
-            await update.message.reply_text(blocked_message, parse_mode="Markdown")
-            return
-
-        # Check if URL was provided
-        if not context.args:
-            await update.message.reply_text(
-                "⚠️ Please provide a URL.\n"
-                "Example: /download https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-            )
-            return
-
-        url = context.args[0]
-
-        # Validate URL
-        if not self._is_valid_url(url):
-            await update.message.reply_text("⚠️ Invalid URL. Please provide a valid video URL.")
-            return
-
-        # Check if user has too many active downloads
-        user_id = str(user.id)
-        max_downloads = self.config.get("max_downloads_per_user", 5)
-        if user_id in self.active_downloads and len(self.active_downloads[user_id]) >= max_downloads:
-            await update.message.reply_text(
-                f"⚠️ You have reached the maximum number of concurrent downloads ({max_downloads}).\n"
-                f"Please wait for your current downloads to finish."
-            )
-            return
-
-        # Send processing message
-        processing_message = await update.message.reply_text("🔍 Processing video URL...")
-
-        try:
-            # Get video info
-            info = await self.download_manager.get_video_info(url)
-
-            # Create format selection keyboard
-            formats = self._get_available_formats(info)
-            keyboard = self._create_format_keyboard(url, formats)
-
-            # Update message with format selection
-            # Escape special characters in title and uploader
-            safe_title = self._escape_markdown(info['title'])
-            safe_uploader = self._escape_markdown(info.get('uploader', 'Unknown'))
-
-            await processing_message.edit_text(
-                f"📹 *{safe_title}*\n\n"
-                f"Channel: {safe_uploader}\n"
-                f"Duration: {self._format_duration(info.get('duration', 0))}\n\n"
-                f"Please select a format to download:",
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-
-            # Track this download
-            if user_id not in self.active_downloads:
-                self.active_downloads[user_id] = []
-            # Store the original title (not escaped) for internal use
-            self.active_downloads[user_id].append({
-                "url": url,
-                "title": info['title'],
-                "status": "selecting_format",
-                "message_id": processing_message.message_id
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing video: {e}")
-            await processing_message.edit_text(f"❌ Error: {str(e)}")
-
-    async def cmd_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /audio command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-        logger.info(f"User {user.id} ({user.username}) used /audio command")
-
-        # Check if user is blocked
-        if self.is_user_blocked(user.id):
-            blocked_message = (
-                "🚫 **EKSTRAKSI AUDIO DITOLAK**\n\n"
-                "❌ Akun Anda telah diblokir oleh administrator.\n"
-                "🎵 Anda tidak dapat mengekstrak audio saat ini.\n\n"
-                "⚖️ **Kebijakan pemblokiran:**\n"
-                "• Berlaku untuk semua fitur bot\n"
-                "• Termasuk download video dan audio\n"
-                "• Tidak dapat diakali dengan command berbeda\n\n"
-                "🔄 **Langkah selanjutnya:**\n"
-                "• Tunggu hingga masa blokir berakhir, atau\n"
-                "• Hubungi admin untuk klarifikasi\n"
-                "• Patuhi aturan bot setelah akses dikembalikan\n\n"
-                "💡 **Tips:** Baca terms of service untuk menghindari pemblokiran di masa depan."
-            )
-            await update.message.reply_text(blocked_message, parse_mode="Markdown")
-            return
-
-        # Check if URL was provided
-        if not context.args:
-            await update.message.reply_text(
-                "⚠️ Please provide a URL.\n"
-                "Example: /audio https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-            )
-            return
-
-        url = context.args[0]
-
-        # Validate URL
-        if not self._is_valid_url(url):
-            await update.message.reply_text("⚠️ Invalid URL. Please provide a valid video URL.")
-            return
-
-        # Check if user has too many active downloads
-        user_id = str(user.id)
-        max_downloads = self.config.get("max_downloads_per_user", 5)
-        if user_id in self.active_downloads and len(self.active_downloads[user_id]) >= max_downloads:
-            await update.message.reply_text(
-                f"⚠️ You have reached the maximum number of concurrent downloads ({max_downloads}).\n"
-                f"Please wait for your current downloads to finish."
-            )
-            return
-
-        # Send processing message
-        processing_message = await update.message.reply_text("🔍 Processing audio extraction...")
-
-        try:
-            # Get video info
-            info = await self.download_manager.get_video_info(url)
-
-            # Start audio extraction
-            safe_title = self._escape_markdown(info['title'])
-            await processing_message.edit_text(f"⏳ Extracting audio from: *{safe_title}*...", parse_mode="Markdown")
-
-            # Track this download
-            if user_id not in self.active_downloads:
-                self.active_downloads[user_id] = []
-            self.active_downloads[user_id].append({
-                "url": url,
-                "title": info['title'],
-                "status": "downloading",
-                "message_id": processing_message.message_id,
-                "is_audio": True
-            })
-
-            # Download audio
-            file_path, title = await self.download_manager.download_video(url, extract_audio=True)
-
-            # Send audio file
-            await self._send_file(update, context, file_path, title, is_audio=True)
-
-            # Update user activity
-            self._update_user_activity(user.id, user.username, increment_download=True)
-
-            # Update download status
-            self._update_download_status(user_id, url, "completed")
-            safe_title = self._escape_markdown(title)
-            await processing_message.edit_text(f"✅ Audio extraction completed: *{safe_title}*", parse_mode="Markdown")
-
-        except Exception as e:
-            logger.error(f"Error extracting audio: {e}")
-            await processing_message.edit_text(f"❌ Error: {str(e)}")
-            self._update_download_status(user_id, url, "failed")
-
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /status command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-        user_id = str(user.id)
-
-        if user_id not in self.active_downloads or not self.active_downloads[user_id]:
-            await update.message.reply_text("You don't have any active downloads.")
-            return
-
-        status_text = "📥 *Your Active Downloads:*\n\n"
-
-        for i, download in enumerate(self.active_downloads[user_id], 1):
-            status_emoji = {
-                "selecting_format": "🔍",
-                "downloading": "⏳",
-                "completed": "✅",
-                "failed": "❌"
-            }.get(download["status"], "⏳")
-
-            # Escape title for Markdown
-            safe_title = self._escape_markdown(download['title'])
-            status_text += (
-                f"{i}. {status_emoji} *{safe_title}*\n"
-                f"   Status: {download['status'].replace('_', ' ').title()}\n\n"
-            )
-
-        await update.message.reply_text(
-            status_text,
-            parse_mode="Markdown",
-            reply_markup=self._create_main_menu_keyboard()
-        )
-
-    async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /stats command (admin only).
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-
-        # Check if user is admin by username
-        if not user.username or user.username not in self.config.get("admin_users", []):
-            await update.message.reply_text("⚠️ This command is only available to administrators.")
-            return
-
-        # Collect stats
-        total_downloads = sum(len(downloads) for downloads in self.active_downloads.values())
-        active_users = len(self.active_downloads)
-
-        stats_text = (
-            "📊 *Bot Statistics:*\n\n"
-            f"Active Users: {active_users}\n"
-            f"Active Downloads: {total_downloads}\n"
-            f"Download Directory Size: {self._get_directory_size(self.download_manager.download_dir)}\n\n"
-            f"Bot Uptime: {self._get_uptime()}"
-        )
-
-        await update.message.reply_text(stats_text, parse_mode="Markdown")
-
-    async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /logs command (admin only).
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-
-        # Check if user is admin by username
-        if not user.username or user.username not in self.config.get("admin_users", []):
-            await update.message.reply_text("⚠️ This command is only available to administrators.")
-            return
-
-        # Get log file
-        log_file = "bot_logs.log"
-        if not os.path.exists(log_file):
-            await update.message.reply_text("❌ Log file not found.")
-            return
-
-        # Send log file
-        try:
-            with open(log_file, "rb") as f:
-                await update.message.reply_document(document=f, filename="bot_logs.log")
-        except Exception as e:
-            logger.error(f"Error sending log file: {e}")
-            await update.message.reply_text(f"❌ Error sending log file: {str(e)}")
-
-    async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle the /menu command.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        user = update.effective_user
-        logger.info(f"User {user.id} ({user.username}) opened the menu")
-
-        # Check if user is blocked
-        if self.is_user_blocked(user.id):
-            blocked_message = (
-                "🚫 **MENU TIDAK TERSEDIA**\n\n"
-                "❌ Akun Anda telah diblokir oleh administrator.\n"
-                "☰ Menu dan semua fitur tidak dapat diakses.\n\n"
-                "🔐 **Akses terbatas:**\n"
-                "• Menu utama: Diblokir\n"
-                "• Download video: Diblokir\n"
-                "• Ekstraksi audio: Diblokir\n"
-                "• Status download: Diblokir\n\n"
-                "📞 **Hubungi admin untuk:**\n"
-                "• Mengetahui alasan pemblokiran\n"
-                "• Mengajukan permohonan unblock\n"
-                "• Mendapatkan informasi lebih lanjut\n\n"
-                "⏰ **Pemblokiran bersifat sementara dan dapat dicabut oleh admin.**"
-            )
-            await update.message.reply_text(blocked_message, parse_mode="Markdown")
-            return
-
-        # Update user activity for menu command
-        self._update_user_activity(user.id, user.username, increment_download=False)
-
-        menu_message = (
-            "☰ *Main Menu*\n\n"
-            "Please select an option from the menu below:"
-        )
-
-        await update.message.reply_text(
-            menu_message,
-            parse_mode="Markdown",
-            reply_markup=self._create_main_menu_keyboard()
-        )
-
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle text messages.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        text = update.message.text
-        user = update.effective_user
-
-        # Check if user is blocked
-        logger.info(f"Checking if user {user.id} is blocked for message: {text[:50]}...")
-        if self.is_user_blocked(user.id):
-            logger.warning(f"User {user.id} ({user.username}) is blocked, sending block message for text message")
-            blocked_message = (
-                "🚫 **PESAN DIBLOKIR**\n\n"
-                "❌ Akun Anda telah diblokir oleh administrator.\n"
-                "💬 Semua pesan dan command Anda tidak akan diproses.\n\n"
-                "🚨 **Status akun:** DIBLOKIR\n"
-                "📅 **Sejak:** Lihat riwayat dengan admin\n"
-                "🔒 **Akses:** Ditangguhkan sementara\n\n"
-                "📋 **Yang tidak dapat Anda lakukan:**\n"
-                "• Mengirim URL untuk download\n"
-                "• Menggunakan semua command bot\n"
-                "• Mengakses fitur apapun\n\n"
-                "📞 **Kontak admin untuk informasi lebih lanjut**\n"
-                "⚠️ **Peringatan:** Jangan spam pesan, ini dapat memperburuk situasi."
-            )
-            try:
-                await update.message.reply_text(blocked_message, parse_mode="Markdown")
-                logger.info(f"Block message sent successfully to user {user.id} for text message")
-            except Exception as e:
-                logger.error(f"Failed to send block message to user {user.id}: {e}")
-                # Fallback without markdown
-                await update.message.reply_text(blocked_message.replace("**", "").replace("*", ""))
-            return
-
-        # Check if message is a URL
-        if self._is_valid_url(text):
-            # Treat as download command
-            context.args = [text]
-            await self.cmd_download(update, context)
-        # Handle menu button clicks
-        elif text == "📥 Download Video":
-            await update.message.reply_text(
-                "Please send me a video URL to download.\n"
-                "Example: https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-            )
-        elif text == "🎵 Extract Audio":
-            await update.message.reply_text(
-                "Please send me a video URL to extract audio from.\n"
-                "Example: https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-            )
-        elif text == "📊 Status":
-            await self.cmd_status(update, context)
-        elif text == "ℹ️ Help":
-            await self.cmd_help(update, context)
-        elif text == "🤖 About":
-            await self.cmd_about(update, context)
-        else:
-            # Not a URL or menu option, provide help
-            await update.message.reply_text(
-                "Please send me a video URL, use a command, or select an option from the menu.\n"
-                "Click the ☰ menu button or type /menu to see available options."
-            )
-
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle callback queries from inline keyboards.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        query = update.callback_query
-        await query.answer()  # Acknowledge the button click
-
-        # Parse callback data using pipe character as separator
-        data = query.data.split("|")
-        action = data[0]
-
-        # Import base64 for decoding
-        import base64
-
-        if action == "download":
-            # Format: download|encoded_url|format_id
-            if len(data) < 3:
-                await query.edit_message_text("❌ Invalid callback data")
-                return
-
-            # Decode the URL from base64
-            try:
-                encoded_url = data[1]
-                url = base64.b64decode(encoded_url.encode('utf-8')).decode('utf-8')
-                format_id = data[2]
-            except Exception as e:
-                logger.error(f"Error decoding URL: {e}")
-                await query.edit_message_text("❌ Error decoding URL")
-                return
-
-            # Start download
-            safe_format = self._escape_markdown(format_id)
-            await query.edit_message_text(f"⏳ Downloading video in {safe_format} format...", parse_mode="Markdown")
-
-            user = update.effective_user
-            user_id = str(user.id)
-
-            # Update download status
-            self._update_download_status(user_id, url, "downloading")
-
-            try:
-                # Download video
-                file_path, title = await self.download_manager.download_video(url, format_id)
-
-                # Send video file
-                await self._send_file(update, context, file_path, title)
-
-                # Update user activity
-                self._update_user_activity(user.id, user.username, increment_download=True)
-
-                # Update download status
-                self._update_download_status(user_id, url, "completed")
-                safe_title = self._escape_markdown(title)
-                await query.edit_message_text(f"✅ Download completed: *{safe_title}*", parse_mode="Markdown")
-
-            except Exception as e:
-                logger.error(f"Error downloading video: {e}")
-                await query.edit_message_text(f"❌ Error: {str(e)}")
-                self._update_download_status(user_id, url, "failed")
-
-        elif action == "cancel":
-            # Format: cancel|encoded_url
-            if len(data) < 2:
-                await query.edit_message_text("❌ Invalid callback data")
-                return
-
-            # Decode the URL from base64
-            try:
-                encoded_url = data[1]
-                url = base64.b64decode(encoded_url.encode('utf-8')).decode('utf-8')
-            except Exception as e:
-                logger.error(f"Error decoding URL: {e}")
-                await query.edit_message_text("❌ Error decoding URL")
-                return
-
-            user_id = str(update.effective_user.id)
-
-            # Remove download from active downloads
-            self._remove_download(user_id, url)
-
-            await query.edit_message_text("❌ Download cancelled")
-
-    async def _send_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, title: str, is_audio: bool = False) -> None:
-        """
-        Send a file to the user.
-
-        Args:
-            update: Update object
-            context: Context object
-            file_path: Path to the file
-            title: Title of the video/audio
-            is_audio: Whether the file is audio
-        """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        file_size = os.path.getsize(file_path)
-
-        # Check if file is too large for Telegram
-        if file_size > MAX_FILE_SIZE:
-            # File is too large, provide download link
-            # In a real implementation, you would upload to a file hosting service
-            # and provide a download link
-            await update.effective_message.reply_text(
-                f"⚠️ File is too large to send via Telegram ({file_size / (1024 * 1024):.1f} MB).\n"
-                f"Please download it from the server directly."
-            )
-            return
-
-        # Send file based on type
-        try:
-            if is_audio:
-                with open(file_path, "rb") as f:
-                    await update.effective_message.reply_audio(
-                        audio=f,
-                        title=title,
-                        performer="YouTube Downloader Bot",
-                        caption=f"🎵 {title}"
-                    )
-            else:
-                with open(file_path, "rb") as f:
-                    await update.effective_message.reply_video(
-                        video=f,
-                        caption=f"📹 {title}",
-                        supports_streaming=True
-                    )
-        except Exception as e:
-            logger.error(f"Error sending file: {e}")
-            # If sending as video fails, try sending as document
-            try:
-                with open(file_path, "rb") as f:
-                    await update.effective_message.reply_document(
-                        document=f,
-                        caption=f"📁 {title}"
-                    )
-            except Exception as e2:
-                logger.error(f"Error sending file as document: {e2}")
-                raise Exception(f"Failed to send file: {str(e2)}")
-
-    def _update_download_status(self, user_id: str, url: str, status: str) -> None:
-        """
-        Update the status of a download.
-
-        Args:
-            user_id: User ID
-            url: Video URL
-            status: New status
-        """
-        if user_id in self.active_downloads:
-            # Find the download by URL, handling potential URL encoding differences
-            for download in self.active_downloads[user_id]:
-                # Compare URLs in a normalized way
-                if self._normalize_url(download["url"]) == self._normalize_url(url):
-                    download["status"] = status
-                    break
-
-    def _remove_download(self, user_id: str, url: str) -> None:
-        """
-        Remove a download from active downloads.
-
-        Args:
-            user_id: User ID
-            url: Video URL
-        """
-        if user_id in self.active_downloads:
-            # Filter out the download with the matching URL, handling potential URL encoding differences
-            normalized_url = self._normalize_url(url)
-            self.active_downloads[user_id] = [
-                d for d in self.active_downloads[user_id]
-                if self._normalize_url(d["url"]) != normalized_url
-            ]
-
-    def _normalize_url(self, url: str) -> str:
-        """
-        Normalize a URL for comparison.
-
-        Args:
-            url: URL to normalize
-
-        Returns:
-            Normalized URL
-        """
-        # Simple normalization - remove trailing slashes and lowercase
-        # This could be expanded with more sophisticated URL normalization if needed
-        return url.rstrip('/').lower()
-
-    def _get_available_formats(self, info: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Get available formats for a video.
-
-        Args:
-            info: Video information
-
-        Returns:
-            List of available formats
-        """
-        formats = []
-
-        # Add best video+audio format
+    def _download_sync(self, url: str, opts: Dict[str, Any], temp_dir: Path) -> str:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return info.get("title", "video") if info else "video"
+
+    # ── format helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def get_available_formats(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Build a curated list of selectable formats from raw yt-dlp info."""
+        formats: List[Dict[str, Any]] = []
+
+        # Always offer best + audio options
         formats.append({
-            "format_id": "best",
-            "ext": info.get("ext", "mp4"),
-            "resolution": "Best Quality",
-            "description": "Best Quality (Video + Audio)"
+            "format_id": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "ext": "mp4",
+            "resolution": "🏆 Best",
+            "label": "🏆 Best Quality (MP4)",
         })
-
-        # Add best audio format
         formats.append({
-            "format_id": "bestaudio",
+            "format_id": "bestaudio/best",
             "ext": "mp3",
-            "resolution": "Audio Only",
-            "description": "Best Audio Quality (MP3)"
+            "resolution": "🎵 Audio",
+            "label": "🎵 Audio Only (MP3)",
+            "is_audio": True,
         })
 
-        # Add some specific formats if available
-        if "formats" in info:
-            # Filter for common formats with both video and audio
-            video_formats = [
+        if "formats" not in info:
+            return formats
+
+        seen_heights: set = set()
+        target_heights = [2160, 1440, 1080, 720, 480, 360]
+        icons = {2160: "4K", 1440: "2K", 1080: "HD", 720: "HD", 480: "SD", 360: "SD"}
+
+        # Collect video-only streams and combine with audio
+        for height in target_heights:
+            matching = [
                 f for f in info["formats"]
-                if f.get("vcodec", "none") != "none" and f.get("acodec", "none") != "none"
-                and f.get("height", 0) in [360, 480, 720, 1080]
+                if f.get("height") == height
+                and f.get("vcodec", "none") not in ("none", None)
             ]
-
-            # Sort by height (resolution)
-            video_formats.sort(key=lambda x: x.get("height", 0))
-
-            # Add unique resolutions
-            added_resolutions = set()
-            for fmt in video_formats:
-                height = fmt.get("height", 0)
-                if height and height not in added_resolutions:
-                    formats.append({
-                        "format_id": fmt["format_id"],
-                        "ext": fmt.get("ext", "mp4"),
-                        "resolution": f"{height}p",
-                        "description": f"{height}p ({fmt.get('ext', 'mp4')})"
-                    })
-                    added_resolutions.add(height)
+            if not matching:
+                continue
+            best = max(matching, key=lambda x: x.get("tbr", 0) or 0)
+            label_tag = icons.get(height, "")
+            formats.append({
+                "format_id": f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]",
+                "ext": "mp4",
+                "resolution": f"{height}p",
+                "label": f"{'📺' if height >= 1080 else '📹'} {height}p {label_tag}",
+                "filesize": best.get("filesize") or best.get("filesize_approx", 0),
+            })
+            seen_heights.add(height)
 
         return formats
 
-    def _create_format_keyboard(self, url: str, formats: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-        """
-        Create an inline keyboard for format selection.
 
-        Args:
-            url: Video URL
-            formats: List of available formats
+# ───────────────────────── Async Download Queue ───────────────────────────────
 
-        Returns:
-            InlineKeyboardMarkup
-        """
-        keyboard = []
+class DownloadQueue:
+    """
+    A bounded async queue with multiple worker coroutines.
+    Dispatches DownloadTask objects and updates their status live.
+    """
 
-        # Use base64 encoding to safely encode the URL in callback data
-        import base64
-        encoded_url = base64.b64encode(url.encode('utf-8')).decode('utf-8')
+    def __init__(self, manager: DownloadManager, num_workers: int = QUEUE_WORKER_COUNT) -> None:
+        self.manager = manager
+        self.num_workers = num_workers
+        self._queue: asyncio.Queue[DownloadTask] = asyncio.Queue(maxsize=50)
+        self._tasks: Dict[str, DownloadTask] = {}
+        self._bot_app: Optional[Application] = None
+        self._workers: List[asyncio.Task] = []
+        self._running = False
 
-        # Add a button for each format
-        for fmt in formats:
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=fmt["description"],
-                    callback_data=f"download|{encoded_url}|{fmt['format_id']}"
-                )
-            ])
+    def set_app(self, app: Application) -> None:
+        self._bot_app = app
 
-        # Add cancel button
-        keyboard.append([
-            InlineKeyboardButton(
-                text="❌ Cancel",
-                callback_data=f"cancel|{encoded_url}"
-            )
-        ])
+    async def start(self) -> None:
+        self._running = True
+        for i in range(self.num_workers):
+            t = asyncio.create_task(self._worker(i), name=f"dl-worker-{i}")
+            self._workers.append(t)
+        logger.info("Download queue started with %d workers", self.num_workers)
 
-        return InlineKeyboardMarkup(keyboard)
+    async def stop(self) -> None:
+        self._running = False
+        for t in self._workers:
+            t.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        logger.info("Download queue stopped")
 
-    def _is_valid_url(self, url: str) -> bool:
-        """
-        Check if a URL is valid.
-
-        Args:
-            url: URL to check
-
-        Returns:
-            True if valid, False otherwise
-        """
-        # Simple URL validation
-        url_pattern = re.compile(
-            r'^(?:http|https)://'  # http:// or https://
-            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  # domain
-            r'localhost|'  # localhost
-            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # or IP
-            r'(?::\d+)?'  # optional port
-            r'(?:/?|[/?]\S+)$', re.IGNORECASE)
-
-        return bool(url_pattern.match(url))
-
-    def _format_duration(self, seconds: int) -> str:
-        """
-        Format duration in seconds to HH:MM:SS.
-
-        Args:
-            seconds: Duration in seconds
-
-        Returns:
-            Formatted duration string
-        """
-        if not seconds:
-            return "Unknown"
-
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        else:
-            return f"{minutes:02d}:{seconds:02d}"
-
-    def _escape_markdown(self, text: str) -> str:
-        """
-        Escape Markdown special characters in text.
-
-        Args:
-            text: Text to escape
-
-        Returns:
-            Escaped text safe for Markdown parsing
-        """
-        # Characters that need to be escaped in Markdown v2: _ * [ ] ( ) ~ ` > # + - = | { } . !
-        # For Markdown (v1) we need to escape: _ * [ ] ( ) `
-        escape_chars = ['_', '*', '[', ']', '(', ')', '`']
-
-        for char in escape_chars:
-            text = text.replace(char, f"\\{char}")
-
-        return text
-
-    def _get_directory_size(self, path: str) -> str:
-        """
-        Get the size of a directory in human-readable format.
-
-        Args:
-            path: Directory path
-
-        Returns:
-            Size string
-        """
-        total_size = 0
-        for dirpath, dirnames, filenames in os.walk(path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                if os.path.exists(fp):
-                    total_size += os.path.getsize(fp)
-
-        # Convert to MB or GB
-        if total_size > 1024 * 1024 * 1024:
-            return f"{total_size / (1024 * 1024 * 1024):.2f} GB"
-        else:
-            return f"{total_size / (1024 * 1024):.2f} MB"
-
-    def _get_uptime(self) -> str:
-        """
-        Get bot uptime.
-
-        Returns:
-            Uptime string
-        """
-        if hasattr(self, 'start_time'):
-            now = datetime.datetime.now()
-            delta = now - self.start_time
-
-            days = delta.days
-            hours, remainder = divmod(delta.seconds, 3600)
-            minutes, seconds = divmod(remainder, 60)
-
-            parts = []
-            if days > 0:
-                parts.append(f"{days} day{'s' if days != 1 else ''}")
-            if hours > 0:
-                parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
-            if minutes > 0:
-                parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
-            if seconds > 0 and not parts:  # Only show seconds if no other parts
-                parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
-
-            return ", ".join(parts)
-        else:
-            return "Since last restart"
-
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle errors in the dispatcher.
-
-        Args:
-            update: Update object
-            context: Context object
-        """
-        logger.error(f"Exception while handling an update: {context.error}")
-
-        # Log the error to chat for debugging
-        if update and isinstance(update, Update) and update.effective_message:
-            error_message = f"❌ An error occurred: {str(context.error)}"
-            await update.effective_message.reply_text(error_message)
-
-    def run(self) -> None:
-        """Run the bot."""
-        # Set up post-init callback to set bot commands
-        async def post_init(application: Application) -> None:
-            await self._set_bot_commands()
-
-        self.application.post_init = post_init
-
-        # Start the bot
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-    def stop(self) -> None:
-        """Stop the bot."""
-        if self.application:
-            # Stop the application
-            self.application.stop()
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """
-        Get bot statistics.
-
-        Returns:
-            Dictionary containing bot statistics
-        """
-        try:
-            # Load user data
-            user_data = self._load_user_data()
-
-            total_users = len(user_data)
-            active_users = 0
-            total_downloads = 0
-
-            # Calculate statistics
-            current_time = datetime.datetime.now()
-            for user in user_data:
-                downloads = user.get('download_count', 0)
-                total_downloads += downloads
-
-                # Check if user was active in last 30 days
-                last_activity = user.get('last_activity')
-                if last_activity:
-                    try:
-                        last_activity_date = datetime.datetime.fromisoformat(last_activity)
-                        if (current_time - last_activity_date).days <= 30:
-                            active_users += 1
-                    except:
-                        pass
-
-            return {
-                'total_users': total_users,
-                'active_users': active_users,
-                'total_downloads': total_downloads,
-                'uptime': (current_time - self.start_time).total_seconds() if hasattr(self, 'start_time') else 0
-            }
-        except Exception as e:
-            logger.error(f"Error getting statistics: {e}")
-            return {
-                'total_users': 0,
-                'active_users': 0,
-                'total_downloads': 0,
-                'uptime': 0
-            }
-
-    def get_user_stats(self) -> List[Dict[str, Any]]:
-        """
-        Get user statistics.
-
-        Returns:
-            List of user data dictionaries
-        """
-        try:
-            return self._load_user_data()
-        except Exception as e:
-            logger.error(f"Error getting user stats: {e}")
-            return []
-
-    def _load_user_data(self) -> List[Dict[str, Any]]:
-        """Load user data from file."""
-        try:
-            user_data_file = "bot_users.json"
-            if os.path.exists(user_data_file):
-                with open(user_data_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading user data: {e}")
-        return []
-
-    def _save_user_data(self, user_data: List[Dict[str, Any]]) -> None:
-        """Save user data to file."""
-        try:
-            user_data_file = "bot_users.json"
-            with open(user_data_file, 'w', encoding='utf-8') as f:
-                json.dump(user_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error saving user data: {e}")
-
-    def _update_user_activity(self, user_id: int, username: str = None, increment_download: bool = True) -> None:
-        """Update user activity in database."""
-        try:
-            user_data = self._load_user_data()
-            current_time = datetime.datetime.now().isoformat()
-
-            # Find existing user or create new one
-            user_found = False
-            for user in user_data:
-                if user.get('user_id') == user_id:
-                    user['last_activity'] = current_time
-                    if username:
-                        user['username'] = username
-                    if increment_download:
-                        user['download_count'] = user.get('download_count', 0) + 1
-                    user_found = True
-                    break
-
-            if not user_found:
-                # Add new user
-                new_user = {
-                    'user_id': user_id,
-                    'username': username or f"user_{user_id}",
-                    'last_activity': current_time,
-                    'download_count': 1 if increment_download else 0,
-                    'status': 'Aktif'
-                }
-                user_data.append(new_user)
-
-            self._save_user_data(user_data)
-            logger.info(f"User activity updated: {username} (ID: {user_id}) - Download: {increment_download}")
-        except Exception as e:
-            logger.error(f"Error updating user activity: {e}")
-
-    def update_user_status(self, user_id: int, new_status: str) -> bool:
-        """Update user status (for blocking/unblocking)."""
-        try:
-            user_data = self._load_user_data()
-            user_found = False
-
-            for user in user_data:
-                if user.get('user_id') == user_id:
-                    user['status'] = new_status
-                    user_found = True
-                    break
-
-            if user_found:
-                self._save_user_data(user_data)
-                logger.info(f"User {user_id} status updated to {new_status}")
-                return True
-            else:
-                logger.warning(f"User {user_id} not found for status update")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error updating user status: {e}")
+    async def enqueue(self, task: DownloadTask) -> bool:
+        """Returns True if successfully queued, False if queue full."""
+        if self._queue.full():
             return False
+        self._tasks[task.task_id] = task
+        await self._queue.put(task)
+        return True
 
-    def is_user_blocked(self, user_id: int) -> bool:
-        """Check if user is blocked."""
-        try:
-            user_data = self._load_user_data()
-            logger.info(f"Checking block status for user {user_id}. Total users in data: {len(user_data)}")
+    def get_task(self, task_id: str) -> Optional[DownloadTask]:
+        return self._tasks.get(task_id)
 
-            for user in user_data:
-                if user.get('user_id') == user_id:
-                    status = user.get('status')
-                    is_blocked = status == 'Diblokir'
-                    logger.info(f"User {user_id} found with status: {status}, blocked: {is_blocked}")
-                    return is_blocked
-
-            logger.info(f"User {user_id} not found in user data, treating as not blocked")
-            return False
-        except Exception as e:
-            logger.error(f"Error checking user block status: {e}")
-            return False
-
-    def create_test_blocked_user(self, user_id: int, username: str = "test_user") -> None:
-        """Create a test blocked user for debugging purposes."""
-        try:
-            user_data = self._load_user_data()
-
-            # Remove existing user if exists
-            user_data = [user for user in user_data if user.get('user_id') != user_id]
-
-            # Add blocked test user
-            blocked_user = {
-                'user_id': user_id,
-                'username': username,
-                'last_activity': datetime.datetime.now().isoformat(),
-                'download_count': 0,
-                'status': 'Diblokir'
-            }
-            user_data.append(blocked_user)
-
-            self._save_user_data(user_data)
-            logger.info(f"Created test blocked user: {user_id} ({username})")
-
-        except Exception as e:
-            logger.error(f"Error creating test blocked user: {e}")
-
-    async def cmd_test_block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Test command to block current user for testing purposes."""
-        user = update.effective_user
-        logger.info(f"User {user.id} ({user.username}) used /testblock command")
-
-        # Block the current user for testing
-        self.create_test_blocked_user(user.id, user.username or f"user_{user.id}")
-
-        await update.message.reply_text(
-            f"✅ User {user.username or user.id} has been blocked for testing.\n"
-            f"Try sending any message or command to test the block messages.\n"
-            f"Use the admin panel to unblock yourself."
+    def user_task_count(self, user_id: int) -> int:
+        return sum(
+            1 for t in self._tasks.values()
+            if t.user_id == user_id
+            and t.status not in (DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED)
         )
 
-    def integrate_with_main_app(self) -> None:
-        """
-        Integrate the bot with the main application.
+    async def _worker(self, worker_id: int) -> None:
+        logger.info("Worker %d started", worker_id)
+        while self._running:
+            try:
+                task = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
-        This method should be called after the bot is initialized
-        to set up any necessary connections with the main app.
-        """
-        if not self.parent_app:
-            logger.warning("No parent application provided for integration")
+            try:
+                await self._process_task(task)
+            except Exception as exc:
+                logger.exception("Worker %d: unhandled error on task %s: %s", worker_id, task.task_id, exc)
+                task.status = DownloadStatus.FAILED
+                task.error_msg = str(exc)
+            finally:
+                self._queue.task_done()
+
+        logger.info("Worker %d stopped", worker_id)
+
+    async def _process_task(self, task: DownloadTask) -> None:
+        """Core download & upload logic for a single task."""
+        assert self._bot_app is not None, "Bot app not set on queue"
+        bot = self._bot_app.bot
+
+        async def edit_status(text: str) -> None:
+            """
+            Edit the status message whether it's a text or photo/media message.
+            The user might have selected a format from a photo (thumbnail) message,
+            so we must handle both edit_message_text and edit_message_caption.
+            """
+            try:
+                await bot.edit_message_text(
+                    chat_id=task.chat_id,
+                    message_id=task.message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as exc:
+                err = str(exc).lower()
+                if "there is no text" in err or "message has no text" in err:
+                    # It's a photo/media message — use edit_message_caption instead
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=task.chat_id,
+                            message_id=task.message_id,
+                            caption=text,
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass  # Caption edit also failed — message may be deleted
+                elif "message is not modified" in err:
+                    pass  # Harmless
+                # All other errors (message deleted, etc.) are silently ignored
+
+        last_progress_update = 0.0
+
+        # Capture the running event loop HERE, in the async context (main thread).
+        # progress_hook is called from a ThreadPoolExecutor thread where
+        # asyncio.get_event_loop() raises RuntimeError in Python 3.10+.
+        # Passing the loop explicitly via closure is the correct pattern.
+        _loop = asyncio.get_running_loop()
+
+        def progress_hook(d: Dict[str, Any]) -> None:
+            """Called by yt-dlp from a worker thread — must not call async directly."""
+            nonlocal last_progress_update
+            if d.get("status") != "downloading":
+                return
+            now = time.monotonic()
+            if now - last_progress_update < PROGRESS_UPDATE_INTERVAL:
+                return
+            last_progress_update = now
+
+            pct = 0.0
+            downloaded = d.get("downloaded_bytes", 0) or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            if total:
+                pct = min(downloaded / total * 100, 100)
+
+            speed = (d.get("_speed_str") or "").strip()
+            eta   = (d.get("_eta_str")   or "").strip()
+            task.progress_pct = pct
+            task.speed_str = speed
+            task.eta_str   = eta
+
+            bar_filled = int(pct / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+            progress_text = (
+                f"⏬ <b>Downloading...</b>\n\n"
+                f"📹 {_esc(task.title or 'Video')}\n\n"
+                f"<code>[{bar}]</code> {pct:.1f}%\n"
+                f"⚡ {speed}  ⏱ ETA: {eta}"
+            )
+            # Schedule coroutine safely from a non-async thread using the
+            # captured loop — this is the only thread-safe way to bridge
+            # sync→async in Python 3.10+
+            asyncio.run_coroutine_threadsafe(edit_status(progress_text), _loop)
+
+        task.status = DownloadStatus.DOWNLOADING
+        await edit_status(
+            f"⏬ <b>Download dimulai...</b>\n\n"
+            f"📹 {_esc(task.title or task.url)}\n"
+            f"<code>[░░░░░░░░░░░░░░░░░░░░]</code> 0%"
+        )
+
+        try:
+            files, title = await asyncio.wait_for(
+                self.manager.download_video(
+                    url=task.url,
+                    format_id=task.format_id,
+                    extract_audio=task.extract_audio,
+                    progress_hook=progress_hook,
+                ),
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            task.status = DownloadStatus.FAILED
+            task.error_msg = "Download timeout (15 menit)"
+            await edit_status(f"❌ <b>Timeout:</b> Download melebihi batas waktu 15 menit.")
             return
 
-        # Use the parent app's download functionality
-        logger.info("Integrating Telegram bot with main application")
+        task.title = title
+        task.status = DownloadStatus.UPLOADING
+        await edit_status(f"📤 <b>Mengupload ke Telegram...</b>\n\n📹 {_esc(title)}")
+
+        success_count = 0
+        for file_path in files:
+            try:
+                await self._send_file(bot, task, file_path, title)
+                success_count += 1
+                if self._bot_app.bot_data.get("config", BotConfig()).get("cleanup_after_send", True):
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            except Exception as exc:
+                # _send_file already retried internally — this is a genuine final failure
+                logger.error("Failed to send %s after retries: %s", file_path.name, exc)
+                try:
+                    await bot.send_message(
+                        chat_id=task.chat_id,
+                        text=(
+                            "❌ <b>Gagal mengirim file setelah beberapa percobaan</b>\n\n"
+                            f"📁 {_esc(file_path.name)}\n"
+                            f"⚠️ {_esc(str(exc)[:200])}"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+
+        if success_count > 0:
+            task.status = DownloadStatus.COMPLETED
+            task.completed_at = time.time()
+            await edit_status(
+                f"✅ <b>Selesai!</b>\n\n"
+                f"📹 {_esc(title)}\n"
+                f"{'🎵' if task.extract_audio else '🎬'} {success_count} file dikirim."
+            )
+        else:
+            task.status = DownloadStatus.FAILED
+            await edit_status("❌ <b>Gagal mengirim semua file.</b>")
+
+    async def _send_file(
+        self, bot: Any, task: DownloadTask, file_path: Path, title: str
+    ) -> None:
+        """Send file with automatic retry on timeout (up to 3 attempts)."""
+        if not file_path.exists():
+            raise FileNotFoundError(f"File tidak ada: {file_path}")
+
+        file_size = file_path.stat().st_size
+        if file_size > MAX_FILE_SIZE:
+            size_mb = file_size / 1024 / 1024
+            msg = (
+                "<b>⚠️ File terlalu besar untuk Telegram</b>\n\n"
+                f"📁 Ukuran: {size_mb:.1f} MB\n"
+                f"📏 Batas: {MAX_FILE_SIZE_MB} MB\n\n"
+                "💡 Coba pilih kualitas lebih rendah."
+            )
+            await bot.send_message(
+                chat_id=task.chat_id, text=msg, parse_mode=ParseMode.HTML,
+            )
+            return
+
+        ext = file_path.suffix.lower()
+        icon = "🎵" if task.extract_audio else "🎬"
+        caption = f"{icon} <b>{_esc(title)}</b>\n<i>via Modern YouTube Downloader Bot</i>"
+
+        async def _attempt() -> None:
+            with file_path.open("rb") as fh:
+                if task.extract_audio or ext in (".mp3", ".m4a", ".ogg", ".flac", ".wav"):
+                    await bot.send_audio(
+                        chat_id=task.chat_id, audio=fh,
+                        title=title[:64], caption=caption, parse_mode=ParseMode.HTML,
+                    )
+                elif ext in (".mp4", ".mov", ".m4v", ".webm"):
+                    try:
+                        await bot.send_video(
+                            chat_id=task.chat_id, video=fh, caption=caption,
+                            parse_mode=ParseMode.HTML, supports_streaming=True,
+                        )
+                    except Exception:
+                        fh.seek(0)
+                        await bot.send_document(
+                            chat_id=task.chat_id, document=fh,
+                            filename=file_path.name, caption=caption,
+                            parse_mode=ParseMode.HTML,
+                        )
+                else:
+                    await bot.send_document(
+                        chat_id=task.chat_id, document=fh,
+                        filename=file_path.name, caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+
+        last_exc: Exception = RuntimeError("No attempts made")
+        for attempt in range(1, 4):
+            try:
+                await _attempt()
+                return
+            except Exception as exc:
+                last_exc = exc
+                is_transient = any(
+                    t in str(exc).lower()
+                    for t in ("timed out", "timeout", "network", "connection")
+                )
+                if is_transient and attempt < 3:
+                    wait = 2 ** attempt
+                    logger.warning("Upload timeout (attempt %d/3), retry in %ds", attempt, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+        raise last_exc
+
+
+# ─────────────────────────────── Utilities ────────────────────────────────────
+
+def _esc(text: str) -> str:
+    """Escape HTML special characters."""
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+    )
+
+
+def _fmt_duration(seconds: Optional[int]) -> str:
+    if not seconds:
+        return "—"
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _fmt_bytes(num_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num_bytes < 1024:
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes //= 1024
+    return f"{num_bytes} PB"
+
+
+def _is_valid_url(url: str) -> bool:
+    return bool(re.match(
+        r"^https?://"
+        r"(?:[A-Z0-9](?:[A-Z0-9\-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,}"
+        r"(?::\d+)?(?:/[^\s]*)?$",
+        url,
+        re.IGNORECASE,
+    ))
+
+
+def _make_task_id(user_id: int) -> str:
+    import uuid
+    return f"{user_id}-{uuid.uuid4().hex[:8]}"
+
+
+# ──────────────────────────── Middleware Decorators ───────────────────────────
+
+def require_not_banned(func: Callable) -> Callable:
+    """Decorator: reject banned users before entering the handler."""
+    @wraps(func)
+    async def wrapper(self: "TelegramBot", update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user and self.user_db.is_banned(user.id):
+            rec = self.user_db.get(user.id)
+            reason = (rec.ban_reason or "Tidak ada alasan.") if rec else "—"
+            ban_until = (
+                f"\n⏰ Sampai: {rec.ban_until[:10]}" if rec and rec.ban_until else "\n⛔ Permanen"
+            ) if rec else ""
+            await update.effective_message.reply_text(
+                f"🚫 <b>Akun Anda diblokir</b>\n\n"
+                f"📋 Alasan: {_esc(reason)}{ban_until}\n\n"
+                f"Hubungi administrator untuk mengajukan banding.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await func(self, update, context)
+    return wrapper
+
+
+def require_admin(func: Callable) -> Callable:
+    """Decorator: only allow admins."""
+    @wraps(func)
+    async def wrapper(self: "TelegramBot", update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not self.config.is_admin(user.id, user.username):
+            await update.effective_message.reply_text(
+                "⛔ Perintah ini hanya untuk administrator.", parse_mode=ParseMode.HTML
+            )
+            return
+        await func(self, update, context)
+    return wrapper
+
+
+def rate_limited(func: Callable) -> Callable:
+    """Decorator: enforce per-user rate limit."""
+    @wraps(func)
+    async def wrapper(self: "TelegramBot", update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.config.get("rate_limit_enabled", True):
+            await func(self, update, context)
+            return
+        user = update.effective_user
+        if not user:
+            await func(self, update, context)
+            return
+        allowed, retry_after = self.rate_limiter.is_allowed(user.id)
+        if not allowed:
+            await update.effective_message.reply_text(
+                f"⏳ <b>Terlalu banyak permintaan.</b>\n"
+                f"Coba lagi dalam {retry_after} detik.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await func(self, update, context)
+    return wrapper
+
+
+def maintenance_check(func: Callable) -> Callable:
+    """Decorator: block all non-admin commands during maintenance."""
+    @wraps(func)
+    async def wrapper(self: "TelegramBot", update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self.config.get("maintenance_mode", False):
+            user = update.effective_user
+            if user and self.config.is_admin(user.id, user.username):
+                await func(self, update, context)
+                return
+            msg = self.config.get("maintenance_message", "🛠️ Bot dalam maintenance.")
+            await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
+            return
+        await func(self, update, context)
+    return wrapper
+
+
+# ─────────────────────────────── Main Bot ─────────────────────────────────────
+
+class TelegramBot:
+    """
+    Main Telegram bot controller.
+
+    Responsibilities:
+      - Register all command/message/callback handlers
+      - Coordinate between UserDatabase, DownloadQueue, RateLimiter, BotConfig
+      - Implement all command business logic
+    """
+
+    # ── init ─────────────────────────────────────────────────────────────────
+
+    def __init__(self, parent_app: Any = None) -> None:
+        self.parent_app = parent_app
+        self.config = BotConfig(parent_app=parent_app)
+        self.user_db = UserDatabase()
+        self.dl_manager = DownloadManager(Path(self.config.get("download_dir", str(DEFAULT_DOWNLOAD_DIR))))
+        self.dl_queue = DownloadQueue(self.dl_manager)
+        # Maps chat_id -> prompt message_id for pending broadcast prompts
+        self._broadcast_prompts: Dict[int, int] = {}
+        self.rate_limiter = RateLimiter(
+            max_requests=self.config.get("rate_limit_requests", RATE_LIMIT_MAX_REQUESTS),
+            window_seconds=self.config.get("rate_limit_window", RATE_LIMIT_WINDOW),
+        )
+        self.start_time = datetime.datetime.now()
+
+        token = self.config.get("telegram_bot_token", "")
+        if not token:
+            raise ValueError(
+                "Telegram bot token tidak ditemukan. "
+                "Set di config.json atau env var TELEGRAM_BOT_TOKEN."
+            )
+
+        self.application = (
+            Application.builder()
+            .token(token)
+            .read_timeout(60)
+            .write_timeout(300)   # 5 min for large file uploads
+            .connect_timeout(30)
+            .pool_timeout(30)
+            .build()
+        )
+        self.application.bot_data["config"] = self.config
+        self._register_handlers()
+        logger.info("TelegramBot v2.0.0 initialized")
+
+    # ── handler registration ──────────────────────────────────────────────────
+
+    def _register_handlers(self) -> None:
+        app = self.application
+
+        # User commands
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("help", self.cmd_help))
+        app.add_handler(CommandHandler("about", self.cmd_about))
+        app.add_handler(CommandHandler("menu", self.cmd_menu))
+        app.add_handler(CommandHandler("download", self.cmd_download))
+        app.add_handler(CommandHandler("audio", self.cmd_audio))
+        app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("history", self.cmd_history))
+        app.add_handler(CommandHandler("settings", self.cmd_settings))
+        app.add_handler(CommandHandler("cancel", self.cmd_cancel))
+        app.add_handler(CommandHandler("formats", self.cmd_formats))
+
+        # Admin commands
+        app.add_handler(CommandHandler("admin", self.cmd_admin_panel))
+        app.add_handler(CommandHandler("stats", self.cmd_stats))
+        app.add_handler(CommandHandler("ban", self.cmd_ban))
+        app.add_handler(CommandHandler("unban", self.cmd_unban))
+        app.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
+        app.add_handler(CommandHandler("logs", self.cmd_logs))
+        app.add_handler(CommandHandler("maintenance", self.cmd_maintenance))
+        app.add_handler(CommandHandler("users", self.cmd_users))
+
+        # Message handler (auto-detect URLs)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+
+        # Callback query handler
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
+
+        # Error handler
+        app.add_error_handler(self.error_handler)
+
+    async def _post_init(self, application: Application) -> None:
+        """Called after Application starts — set bot commands & start queue."""
+        await self._set_bot_commands()
+        self.dl_queue.set_app(application)
+        await self.dl_queue.start()
+        logger.info("Post-init complete")
+
+    async def _post_shutdown(self, application: Application) -> None:
+        """Graceful shutdown: stop queue workers."""
+        await self.dl_queue.stop()
+        logger.info("Bot shutdown complete")
+
+    async def _set_bot_commands(self) -> None:
+        commands = [
+            BotCommand("start", "Mulai bot 🚀"),
+            BotCommand("download", "Download video 📹"),
+            BotCommand("audio", "Download audio 🎵"),
+            BotCommand("formats", "Lihat format tersedia 📋"),
+            BotCommand("status", "Status download aktif 📊"),
+            BotCommand("history", "Riwayat download 📜"),
+            BotCommand("settings", "Preferensi saya ⚙️"),
+            BotCommand("cancel", "Batalkan download ❌"),
+            BotCommand("help", "Bantuan 📖"),
+            BotCommand("about", "Tentang bot ℹ️"),
+        ]
+        try:
+            await self.application.bot.set_my_commands(commands)
+        except Exception as exc:
+            logger.warning("Could not set bot commands: %s", exc)
+
+    # ── keyboards ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _main_keyboard() -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("📥 Download Video"), KeyboardButton("🎵 Download Audio")],
+                [KeyboardButton("📊 Status"), KeyboardButton("⚙️ Settings")],
+                [KeyboardButton("📜 History"), KeyboardButton("ℹ️ Help")],
+            ],
+            resize_keyboard=True,
+        )
+
+    # ── common guard helpers ───────────────────────────────────────────────────
+
+    def _touch_user(self, update: Update) -> None:
+        user = update.effective_user
+        if user:
+            self.user_db.touch(user.id, user.username or "", user.first_name or "")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # USER COMMANDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        assert user is not None
+        rec = self.user_db.get_or_create(user.id, user.username or "", user.first_name or "")
+        self._touch_user(update)
+
+        is_new = rec.download_count == 0 and rec.joined_at[:10] == datetime.date.today().isoformat()
+        greeting = "🎉 Selamat datang!" if is_new else f"👋 Hei, {_esc(user.first_name)}!"
+
+        custom_welcome = self.config.get("welcome_message", "")
+        body = custom_welcome if custom_welcome else (
+            "Bot ini membantu kamu download video & audio dari YouTube "
+            "dan 1000+ platform lainnya.\n\n"
+            "🔗 Cukup kirim link video, dan bot akan memproses semuanya!"
+        )
+
+        platform_list = " • ".join(SUPPORTED_PLATFORMS[:8]) + " • ..."
+
+        await update.message.reply_html(
+            f"{greeting}\n\n"
+            f"{body}\n\n"
+            f"<b>Platform didukung:</b>\n<i>{platform_list}</i>\n\n"
+            f"Ketik /help untuk panduan lengkap.",
+            reply_markup=self._main_keyboard(),
+        )
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._touch_user(update)
+        max_dl = self.config.get("max_concurrent_per_user", 2)
+        await update.message.reply_html(
+            "<b>📖 Panduan Penggunaan</b>\n\n"
+            "<b>🎯 Cara termudah:</b>\n"
+            "Langsung kirim link video — bot otomatis memprosesnya!\n\n"
+            "<b>📋 Perintah tersedia:</b>\n"
+            "• /download &lt;url&gt; — Download video\n"
+            "• /audio &lt;url&gt; — Download audio (MP3)\n"
+            "• /formats &lt;url&gt; — Lihat format tersedia\n"
+            "• /status — Cek download aktif\n"
+            "• /history — Riwayat download\n"
+            "• /settings — Atur preferensi\n"
+            "• /cancel — Batalkan download\n\n"
+            "<b>⚙️ Preferensi:</b>\n"
+            "Atur kualitas default, format audio, dll di /settings\n\n"
+            f"<b>⚠️ Batasan:</b>\n"
+            f"• File maks: <b>{MAX_FILE_SIZE_MB} MB</b> (batas Telegram)\n"
+            f"• Max {max_dl} download bersamaan per user\n"
+            f"• Playlist maks: {self.config.get('max_playlist_items', 25)} video",
+            reply_markup=self._main_keyboard(),
+        )
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_about(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._touch_user(update)
+        stats = self.user_db.stats()
+        await update.message.reply_html(
+            "<b>🤖 Modern YouTube Downloader Bot v2.0.0</b>\n\n"
+            "Bot canggih untuk download video & audio dari ratusan platform.\n\n"
+            "<b>🛠 Teknologi:</b>\n"
+            "• python-telegram-bot v20+\n"
+            "• yt-dlp (fork aktif dari youtube-dl)\n"
+            "• FFmpeg untuk konversi & merging\n"
+            "• Asyncio queue dengan multiple workers\n\n"
+            f"<b>📊 Statistik Global:</b>\n"
+            f"• Total pengguna: {stats['total']:,}\n"
+            f"• Total download: {stats['total_downloads']:,}\n"
+            f"• Data diunduh: {_fmt_bytes(stats['total_bytes'])}\n\n"
+            "<b>👨‍💻 Developer:</b> Adam Official Dev\n"
+            "🔗 <a href='https://github.com/AdamOfficialDev/modern_youtube_downloader'>GitHub</a>",
+            disable_web_page_preview=True,
+            reply_markup=self._main_keyboard(),
+        )
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._touch_user(update)
+        await update.message.reply_html(
+            "☰ <b>Menu Utama</b>\n\nPilih aksi dari keyboard di bawah:",
+            reply_markup=self._main_keyboard(),
+        )
+
+    # ── Download flow ─────────────────────────────────────────────────────────
+
+    @maintenance_check
+    @require_not_banned
+    @rate_limited
+    async def cmd_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Entry point for video download: fetch info → show format keyboard."""
+        self._touch_user(update)
+        user = update.effective_user
+        assert user is not None
+
+        if not context.args:
+            await update.message.reply_html(
+                "⚠️ Kirim URL setelah perintah.\n"
+                "<code>/download https://youtube.com/watch?v=...</code>"
+            )
+            return
+        await self._start_info_fetch(update, context, url=context.args[0], force_audio=False)
+
+    @maintenance_check
+    @require_not_banned
+    @rate_limited
+    async def cmd_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Entry point for audio-only download."""
+        self._touch_user(update)
+        if not context.args:
+            await update.message.reply_html(
+                "⚠️ Kirim URL setelah perintah.\n"
+                "<code>/audio https://youtube.com/watch?v=...</code>"
+            )
+            return
+        await self._start_info_fetch(update, context, url=context.args[0], force_audio=True)
+
+    @maintenance_check
+    @require_not_banned
+    @rate_limited
+    async def cmd_formats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show available formats for a URL without committing to download."""
+        self._touch_user(update)
+        if not context.args:
+            await update.message.reply_html(
+                "⚠️ Kirim URL setelah perintah.\n"
+                "<code>/formats https://youtube.com/watch?v=...</code>"
+            )
+            return
+        await self._start_info_fetch(update, context, url=context.args[0], force_audio=False, formats_only=True)
+
+    async def _start_info_fetch(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        url: str,
+        force_audio: bool,
+        formats_only: bool = False,
+    ) -> None:
+        """Fetch video info and show format selection keyboard."""
+        user = update.effective_user
+        assert user is not None
+
+        if not _is_valid_url(url):
+            await update.message.reply_html("⚠️ URL tidak valid. Pastikan dimulai dengan http:// atau https://")
+            return
+
+        max_concurrent = self.config.get("max_concurrent_per_user", 2)
+        if self.dl_queue.user_task_count(user.id) >= max_concurrent:
+            await update.message.reply_html(
+                f"⚠️ Kamu sudah memiliki {max_concurrent} download aktif.\n"
+                f"Tunggu hingga selesai atau gunakan /cancel."
+            )
+            return
+
+        status_msg = await update.message.reply_html("🔍 <b>Mengambil informasi video...</b>")
+
+        try:
+            info = await asyncio.wait_for(
+                self.dl_manager.get_video_info(url), timeout=30
+            )
+        except asyncio.TimeoutError:
+            await status_msg.edit_text("❌ Timeout saat mengambil info video. Coba lagi.", parse_mode=ParseMode.HTML)
+            return
+        except Exception as exc:
+            logger.warning("Info fetch error for %s: %s", url, exc)
+            await status_msg.edit_text(
+                f"❌ <b>Gagal mengambil info:</b>\n<code>{_esc(str(exc)[:300])}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        title = info.get("title", "Video")
+        duration = _fmt_duration(info.get("duration"))
+        uploader = info.get("uploader") or info.get("channel") or "Unknown"
+        view_count = info.get("view_count", 0)
+        view_str = f"{view_count:,}" if view_count else "—"
+        thumb = info.get("thumbnail", "")
+
+        # Store URL in user_data with a short key to keep callback_data under 64 bytes
+        import hashlib
+        url_key = hashlib.md5(url.encode()).hexdigest()[:16]
+        if context.user_data is None:
+            context.user_data = {}
+        context.user_data[f"url_{url_key}"] = url
+
+        if force_audio:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🎵 Download MP3 (Best Quality)",
+                    callback_data=f"dl|{url_key}|bestaudio/best|audio",
+                )
+            ], [
+                InlineKeyboardButton("❌ Batal", callback_data="cancel_info"),
+            ]])
+        else:
+            formats = self.dl_manager.get_available_formats(info)
+            keyboard = self._build_format_keyboard(url_key, formats, formats_only=formats_only)
+
+        caption = (
+            f"📹 <b>{_esc(title)}</b>\n\n"
+            f"👤 {_esc(uploader)}\n"
+            f"⏱ Durasi: {duration}\n"
+            f"👁 Views: {view_str}\n\n"
+            f"{'🎵 Pilih format audio:' if force_audio else '📋 Pilih format:'}"
+        )
+
+        if formats_only:
+            caption = f"📋 <b>Format tersedia untuk:</b>\n{_esc(title)}\n\n{caption.split(chr(10))[-1]}"
+
+        status_msg_deleted = False
+        try:
+            if thumb:
+                # Delete first, then send photo — track deletion so fallback doesn't
+                # try to edit a message that no longer exists (BadRequest: Message to edit not found)
+                await status_msg.delete()
+                status_msg_deleted = True
+                await update.message.reply_photo(
+                    photo=thumb,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            else:
+                await status_msg.edit_text(caption, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception as send_exc:
+            logger.warning("Thumbnail send failed (%s), falling back to text message", send_exc)
+            if not status_msg_deleted:
+                # Safe to edit — message still exists
+                try:
+                    await status_msg.edit_text(caption, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                except Exception:
+                    # Last resort: send a fresh message
+                    await update.message.reply_html(caption, reply_markup=keyboard)
+            else:
+                # Message was deleted, must send fresh
+                await update.message.reply_html(caption, reply_markup=keyboard)
+
+    @staticmethod
+    def _build_format_keyboard(
+        url_key: str, formats: List[Dict[str, Any]], formats_only: bool = False
+    ) -> InlineKeyboardMarkup:
+        """
+        Build format selection keyboard.
+        url_key is a short opaque key (stored in context.user_data), NOT the raw URL.
+        Telegram limits callback_data to 64 bytes — storing URLs directly would exceed this.
+        Max callback_data breakdown: "dl|" (3) + key (16) + "|" (1) + fmt_id (≤30) + "|video" (6) = ~56 bytes ✅
+        """
+        rows: List[List[InlineKeyboardButton]] = []
+
+        for fmt in formats:
+            is_audio = fmt.get("is_audio", False)
+            audio_flag = "audio" if is_audio else "video"
+            filesize = fmt.get("filesize", 0)
+            size_str = f" (~{_fmt_bytes(filesize)})" if filesize else ""
+            label = f"{fmt['label']}{size_str}"
+            # Truncate format_id to 30 chars to stay safely under 64-byte limit
+            safe_fmt_id = fmt["format_id"][:30]
+            cb = f"dl|{url_key}|{safe_fmt_id}|{audio_flag}"
+            assert len(cb.encode()) <= 64, f"callback_data too long: {cb!r}"
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+
+        rows.append([InlineKeyboardButton("❌ Batal", callback_data="cancel_info")])
+        return InlineKeyboardMarkup(rows)
+
+    # ── Status / History / Settings ───────────────────────────────────────────
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        assert user is not None
+        self._touch_user(update)
+
+        active = [
+            t for t in self.dl_queue._tasks.values()
+            if t.user_id == user.id
+            and t.status not in (DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED)
+        ]
+
+        if not active:
+            await update.message.reply_html("📊 Tidak ada download aktif saat ini.\n\nKirim link video untuk mulai!")
+            return
+
+        lines = ["📊 <b>Download Aktif Kamu:</b>\n"]
+        status_icons = {
+            DownloadStatus.QUEUED: "🕐",
+            DownloadStatus.FETCHING_INFO: "🔍",
+            DownloadStatus.DOWNLOADING: "⏬",
+            DownloadStatus.UPLOADING: "📤",
+        }
+        for t in active:
+            icon = status_icons.get(t.status, "⏳")
+            bar = ""
+            if t.status == DownloadStatus.DOWNLOADING:
+                filled = int(t.progress_pct / 5)
+                bar = f"\n   <code>[{'█'*filled}{'░'*(20-filled)}]</code> {t.progress_pct:.1f}%"
+            lines.append(
+                f"{icon} <b>{_esc(t.title or t.url[:50])}</b>\n"
+                f"   Status: {t.status.value}{bar}\n"
+                f"   ID: <code>{t.task_id}</code>"
+            )
+
+        await update.message.reply_html("\n\n".join(lines))
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        assert user is not None
+        self._touch_user(update)
+
+        completed = [
+            t for t in self.dl_queue._tasks.values()
+            if t.user_id == user.id and t.status == DownloadStatus.COMPLETED
+        ][-10:]  # Last 10
+
+        rec = self.user_db.get(user.id)
+        total = rec.download_count if rec else 0
+        total_bytes = _fmt_bytes(rec.total_bytes) if rec else "—"
+
+        lines = [
+            f"📜 <b>Riwayat Download</b>\n",
+            f"📊 Total: <b>{total} download</b> ({total_bytes})\n",
+        ]
+
+        if completed:
+            lines.append("<b>10 Download Terakhir Sesi Ini:</b>")
+            for t in reversed(completed):
+                dur = ""
+                if t.completed_at:
+                    elapsed = t.completed_at - t.created_at
+                    dur = f" • {elapsed:.0f}s"
+                lines.append(f"✅ {_esc(t.title or t.url[:60])}{dur}")
+        else:
+            lines.append("<i>Belum ada riwayat dalam sesi ini.</i>")
+
+        await update.message.reply_html("\n".join(lines))
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        assert user is not None
+        self._touch_user(update)
+        rec = self.user_db.get_or_create(user.id, user.username or "", user.first_name or "")
+        prefs = rec.preferences
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🏆 Kualitas: {prefs.quality.value}", callback_data="set|quality"),
+            ],
+            [
+                InlineKeyboardButton(f"🎵 Audio: {prefs.audio_format.upper()}", callback_data="set|audio_fmt"),
+                InlineKeyboardButton(f"⚡ Bitrate: {prefs.audio_quality}kbps", callback_data="set|audio_quality"),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if prefs.notification_on_complete else '❌'} Notifikasi Selesai",
+                    callback_data="set|notif"
+                ),
+            ],
+            [InlineKeyboardButton("✖️ Tutup", callback_data="cancel_info")],
+        ])
+
+        await update.message.reply_html(
+            f"⚙️ <b>Pengaturan Kamu</b>\n\n"
+            f"🏆 Kualitas default: <b>{prefs.quality.value}</b>\n"
+            f"🎵 Format audio: <b>{prefs.audio_format.upper()}</b>\n"
+            f"⚡ Kualitas audio: <b>{prefs.audio_quality} kbps</b>\n"
+            f"🔔 Notif selesai: <b>{'Ya' if prefs.notification_on_complete else 'Tidak'}</b>\n\n"
+            f"Tap tombol untuk mengubah:",
+            reply_markup=keyboard,
+        )
+
+    @maintenance_check
+    @require_not_banned
+    async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        assert user is not None
+        active = [
+            t for t in self.dl_queue._tasks.values()
+            if t.user_id == user.id
+            and t.status in (DownloadStatus.QUEUED, DownloadStatus.FETCHING_INFO)
+        ]
+        if not active:
+            await update.message.reply_html(
+                "ℹ️ Tidak ada download yang bisa dibatalkan (yang sudah berjalan tidak bisa dihentikan)."
+            )
+            return
+        for t in active:
+            t.status = DownloadStatus.CANCELLED
+        await update.message.reply_html(f"✅ {len(active)} download dibatalkan.")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ADMIN COMMANDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @require_admin
+    async def cmd_admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        stats = self.user_db.stats()
+        uptime = self._get_uptime()
+        maint = self.config.get("maintenance_mode", False)
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📊 Detail Stats", callback_data="admin|stats"),
+                InlineKeyboardButton("👥 User List", callback_data="admin|users"),
+            ],
+            [
+                InlineKeyboardButton("📢 Broadcast", callback_data="admin|broadcast_hint"),
+                InlineKeyboardButton(f"🛠 Maintenance: {'ON' if maint else 'OFF'}", callback_data="admin|toggle_maint"),
+            ],
+            [
+                InlineKeyboardButton("📜 Log File", callback_data="admin|logs"),
+                InlineKeyboardButton("🔄 Reload Config", callback_data="admin|reload_config"),
+            ],
+        ])
+
+        await update.message.reply_html(
+            f"🛡 <b>Admin Panel</b>\n\n"
+            f"👥 Users: <b>{stats['total']:,}</b> total | "
+            f"<b>{stats['active_30d']:,}</b> aktif 30 hari\n"
+            f"🚫 Banned: <b>{stats['banned']}</b>\n"
+            f"📥 Total DL: <b>{stats['total_downloads']:,}</b>\n"
+            f"💾 Data: <b>{_fmt_bytes(stats['total_bytes'])}</b>\n"
+            f"⏱ Uptime: <b>{uptime}</b>\n"
+            f"🛠 Maintenance: <b>{'ON ⚠️' if maint else 'OFF ✅'}</b>",
+            reply_markup=keyboard,
+        )
+
+    @require_admin
+    async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        stats = self.user_db.stats()
+        queue_size = self.dl_queue._queue.qsize()
+        active_tasks = sum(
+            1 for t in self.dl_queue._tasks.values()
+            if t.status in (DownloadStatus.DOWNLOADING, DownloadStatus.UPLOADING)
+        )
+        dl_dir = Path(self.config.get("download_dir", str(DEFAULT_DOWNLOAD_DIR)))
+        dir_size = sum(f.stat().st_size for f in dl_dir.rglob("*") if f.is_file()) if dl_dir.exists() else 0
+
+        await update.message.reply_html(
+            f"📊 <b>Statistik Bot</b>\n\n"
+            f"<b>Pengguna:</b>\n"
+            f"• Total: {stats['total']:,}\n"
+            f"• Aktif (30 hari): {stats['active_30d']:,}\n"
+            f"• Premium: {stats['premium']:,}\n"
+            f"• Banned: {stats['banned']:,}\n\n"
+            f"<b>Download:</b>\n"
+            f"• Total historis: {stats['total_downloads']:,}\n"
+            f"• Data terunduh: {_fmt_bytes(stats['total_bytes'])}\n"
+            f"• Antrian saat ini: {queue_size}\n"
+            f"• Aktif saat ini: {active_tasks}\n\n"
+            f"<b>Sistem:</b>\n"
+            f"• Uptime: {self._get_uptime()}\n"
+            f"• Folder download: {_fmt_bytes(dir_size)}\n"
+            f"• Workers: {self.dl_queue.num_workers}"
+        )
+
+    @require_admin
+    async def cmd_ban(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Usage: /ban <user_id> [hours] [reason...]"""
+        if not context.args:
+            await update.message.reply_html(
+                "⚠️ Penggunaan: /ban &lt;user_id&gt; [jam] [alasan]\n"
+                "Contoh: /ban 123456789 24 Spam berlebihan"
+            )
+            return
+        try:
+            target_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_html("❌ user_id harus berupa angka.")
+            return
+
+        duration: Optional[int] = None
+        reason_parts = context.args[1:]
+        if reason_parts and reason_parts[0].isdigit():
+            duration = int(reason_parts[0])
+            reason_parts = reason_parts[1:]
+        reason = " ".join(reason_parts) if reason_parts else "Tidak ada alasan diberikan."
+
+        success = self.user_db.ban(target_id, reason=reason, duration_hours=duration)
+        dur_str = f"{duration} jam" if duration else "permanen"
+        if success:
+            await update.message.reply_html(
+                f"✅ User <code>{target_id}</code> di-ban ({dur_str}).\n"
+                f"📋 Alasan: {_esc(reason)}"
+            )
+            # Notify user
+            try:
+                await self.application.bot.send_message(
+                    chat_id=target_id,
+                    text=(
+                        f"🚫 <b>Akun kamu telah diblokir</b>\n\n"
+                        f"📋 Alasan: {_esc(reason)}\n"
+                        f"⏰ Durasi: {dur_str}"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_html(
+                f"❌ User <code>{target_id}</code> tidak ditemukan di database. "
+                f"Mereka mungkin belum pernah menggunakan bot."
+            )
+
+    @require_admin
+    async def cmd_unban(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not context.args:
+            await update.message.reply_html("⚠️ Penggunaan: /unban &lt;user_id&gt;")
+            return
+        try:
+            target_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_html("❌ user_id harus berupa angka.")
+            return
+
+        success = self.user_db.unban(target_id)
+        if success:
+            await update.message.reply_html(f"✅ User <code>{target_id}</code> berhasil di-unban.")
+            try:
+                await self.application.bot.send_message(
+                    chat_id=target_id,
+                    text="✅ <b>Akun kamu telah di-unban.</b> Kamu bisa menggunakan bot kembali.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_html(f"❌ User <code>{target_id}</code> tidak ditemukan.")
+
+    @require_admin
+    async def cmd_broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Broadcast message to all non-banned users."""
+        if not context.args:
+            await update.message.reply_html(
+                "⚠️ Penggunaan: /broadcast &lt;pesan&gt;\n"
+                "Pesan mendukung HTML formatting."
+            )
+            return
+        message = " ".join(context.args)
+        users = [u for u in self.user_db.all_users() if not u.is_banned()]
+
+        status_msg = await update.message.reply_html(
+            f"📢 Mulai broadcast ke <b>{len(users)}</b> pengguna..."
+        )
+
+        sent = failed = 0
+        for user_rec in users:
+            try:
+                await self.application.bot.send_message(
+                    chat_id=user_rec.user_id,
+                    text=f"📢 <b>Pesan dari Admin:</b>\n\n{message}",
+                    parse_mode=ParseMode.HTML,
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)  # ~20 msg/s to stay under Telegram limits
+
+        await status_msg.edit_text(
+            f"📢 <b>Broadcast selesai</b>\n\n"
+            f"✅ Terkirim: {sent}\n"
+            f"❌ Gagal: {failed}",
+            parse_mode=ParseMode.HTML,
+        )
+
+    @require_admin
+    async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        log_path = Path("bot_logs.log")
+        if not log_path.exists():
+            await update.message.reply_html("❌ File log tidak ditemukan.")
+            return
+        # Send last 4000 chars as message for quick viewing
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+        snippet = content[-4000:]
+        await update.message.reply_html(
+            f"<pre>{_esc(snippet)}</pre>",
+        )
+        # Also send full file
+        with log_path.open("rb") as fh:
+            await update.message.reply_document(document=fh, filename="bot_logs.log")
+
+    @require_admin
+    async def cmd_maintenance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        current = self.config.get("maintenance_mode", False)
+        self.config.set("maintenance_mode", not current)
+        state = "AKTIF ⚠️" if not current else "NONAKTIF ✅"
+        await update.message.reply_html(f"🛠 Maintenance mode sekarang: <b>{state}</b>")
+
+    @require_admin
+    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        users = sorted(self.user_db.all_users(), key=lambda u: u.download_count, reverse=True)[:20]
+        lines = ["👥 <b>Top 20 Pengguna (by downloads):</b>\n"]
+        for i, rec in enumerate(users, 1):
+            status_icon = "🚫" if rec.is_banned() else ("⭐" if rec.status == UserStatus.PREMIUM else "👤")
+            lines.append(
+                f"{i}. {status_icon} {_esc(rec.first_name)} "
+                f"(<code>{rec.user_id}</code>)\n"
+                f"   📥 {rec.download_count} DL | 💾 {_fmt_bytes(rec.total_bytes)}"
+            )
+        await update.message.reply_html("\n".join(lines))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MESSAGE HANDLER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @maintenance_check
+    @require_not_banned
+    @rate_limited
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = update.message.text.strip()
+        self._touch_user(update)
+        user = update.effective_user
+        assert user is not None
+
+        # ── Detect pending broadcast — next message after admin clicks Broadcast ──
+        chat_id = update.message.chat_id
+        is_admin = self.config.is_admin(user.id, user.username or "")
+        if is_admin and chat_id in self._broadcast_prompts:
+            # Clear state immediately
+            self._broadcast_prompts.pop(chat_id, None)
+            # Execute broadcast
+            users = [u for u in self.user_db.all_users() if not u.is_banned()]
+            status_msg = await update.message.reply_html(
+                f"📢 Mulai broadcast ke <b>{len(users)}</b> pengguna..."
+            )
+            sent = failed = 0
+            for user_rec in users:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=user_rec.user_id,
+                        text="📢 <b>Pesan dari Admin:</b>\n\n" + text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    sent += 1
+                except Exception:
+                    failed += 1
+                await asyncio.sleep(0.05)
+            await status_msg.edit_text(
+                "📢 <b>Broadcast selesai</b>\n\n"
+                f"✅ Terkirim: {sent}\n"
+                f"❌ Gagal: {failed}",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        # Auto-detect URL
+        if _is_valid_url(text):
+            context.args = [text]
+            await self.cmd_download(update, context)
+            return
+
+        # Handle keyboard buttons
+        button_actions: Dict[str, Callable] = {
+            "📥 Download Video": lambda: update.message.reply_html(
+                "Kirim link video yang ingin kamu download! 🔗"
+            ),
+            "🎵 Download Audio": lambda: update.message.reply_html(
+                "Kirim link video untuk diekstrak audionya! 🎵\n"
+                "Atau gunakan /audio &lt;url&gt;"
+            ),
+            "📊 Status": lambda: self.cmd_status(update, context),
+            "⚙️ Settings": lambda: self.cmd_settings(update, context),
+            "📜 History": lambda: self.cmd_history(update, context),
+            "ℹ️ Help": lambda: self.cmd_help(update, context),
+        }
+
+        if text in button_actions:
+            result = button_actions[text]()
+            if asyncio.iscoroutine(result):
+                await result
+            return
+
+        # Try to extract URL from text
+        url_match = re.search(r"https?://[^\s]+", text)
+        if url_match:
+            context.args = [url_match.group(0)]
+            await self.cmd_download(update, context)
+            return
+
+        await update.message.reply_html(
+            "💡 Kirim link video langsung untuk download, atau pilih opsi dari menu!\n"
+            "Gunakan /help untuk panduan lengkap."
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CALLBACK QUERY HANDLER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    async def _safe_edit(query: Any, text: str, reply_markup: Any = None) -> None:
+        """
+        Unified message-edit helper that works for BOTH text messages and photo/media messages.
+
+        Telegram rules:
+          - edit_message_text  → only for messages that have text (no photo/video/etc.)
+          - edit_message_caption → only for messages that have a caption (photo, video, doc…)
+          - edit_message_reply_markup → only updates buttons, no text change
+
+        Calling the wrong method raises BadRequest: "There is no text in the message to edit"
+        or "Message is not modified". This helper picks the right method automatically.
+        """
+        msg = query.message
+        kwargs: dict = {"parse_mode": ParseMode.HTML}
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        try:
+            if msg.text:
+                # Pure text message → edit_message_text
+                await query.edit_message_text(text, **kwargs)
+            elif msg.caption is not None or msg.photo or msg.video or msg.document:
+                # Media message → edit caption
+                await query.edit_message_caption(caption=text, **kwargs)
+            else:
+                # Unknown message type — send a fresh reply as fallback
+                await msg.reply_html(text, reply_markup=reply_markup)
+        except Exception as exc:
+            err = str(exc).lower()
+            if "message is not modified" in err:
+                return  # Harmless — content didn't change
+            if "there is no text" in err or "message to edit not found" in err:
+                # Final fallback: send new message
+                try:
+                    await msg.reply_html(text, reply_markup=reply_markup)
+                except Exception:
+                    pass
+            else:
+                raise  # Re-raise unexpected errors
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        data = query.data or ""
+        user = update.effective_user
+        assert user is not None
+
+        # ── admin actions ─────────────────────────────────────────────────
+        if data.startswith("admin|"):
+            if not self.config.is_admin(user.id, user.username):
+                await query.answer("⛔ Hanya admin!", show_alert=True)
+                return
+            action = data.split("|", 1)[1]
+            await self._handle_admin_callback(query, action, context)
+            return
+
+        # ── cancel info/format message ────────────────────────────────────
+        if data == "cancel_broadcast":
+            self._broadcast_prompts.pop(update.effective_chat.id, None)
+            await self._safe_edit(query, "❌ Broadcast dibatalkan.")
+            return
+
+        if data == "cancel_info":
+            await self._safe_edit(query, "❌ Dibatalkan.")
+            return
+
+        # ── download action ───────────────────────────────────────────────
+        if data.startswith("dl|"):
+            parts = data.split("|")
+            if len(parts) < 4:
+                await self._safe_edit(query, "❌ Data tidak valid.")
+                return
+
+            url_key   = parts[1]
+            format_id = parts[2]
+            audio_flag = parts[3]
+
+            # Resolve URL from user_data using the short key stored during info fetch
+            url = (context.user_data or {}).get(f"url_{url_key}")
+            if not url:
+                await self._safe_edit(query, "❌ <b>Sesi expired.</b>\nKirim ulang link video untuk memulai lagi.")
+                return
+
+            extract_audio = audio_flag == "audio"
+
+            # Check queue capacity
+            max_concurrent = self.config.get("max_concurrent_per_user", 2)
+            if self.dl_queue.user_task_count(user.id) >= max_concurrent:
+                await query.answer(
+                    f"⚠️ Maks {max_concurrent} download bersamaan!", show_alert=True
+                )
+                return
+
+            task = DownloadTask(
+                task_id=_make_task_id(user.id),
+                user_id=user.id,
+                chat_id=query.message.chat_id,
+                message_id=query.message.message_id,
+                url=url,
+                format_id=format_id,
+                extract_audio=extract_audio,
+            )
+
+            enqueued = await self.dl_queue.enqueue(task)
+            if not enqueued:
+                await query.answer("⚠️ Antrian penuh, coba lagi sebentar.", show_alert=True)
+                return
+
+            # Immediately update message to show queued state
+            queue_pos = self.dl_queue._queue.qsize()
+            await self._safe_edit(
+                query,
+                f"✅ <b>Download ditambahkan ke antrian!</b>\n\n"
+                f"🆔 Task ID: <code>{task.task_id}</code>\n"
+                f"📋 Posisi antrian: ~{queue_pos}\n\n"
+                f"Gunakan /status untuk memantau progress.",
+            )
+
+            # Track download completion to update user stats
+            asyncio.create_task(self._await_task_completion(task))
+            return
+
+        # ── settings actions ───────────────────────────────────────────────
+        if data.startswith("set|"):
+            await self._handle_settings_callback(query, user, data[4:])
+            return
+
+        await self._safe_edit(query, "❓ Aksi tidak dikenal.")
+
+    async def _await_task_completion(self, task: DownloadTask) -> None:
+        """Wait for task completion and update user stats."""
+        while task.status not in (
+            DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED
+        ):
+            await asyncio.sleep(2)
+
+        if task.status == DownloadStatus.COMPLETED:
+            self.user_db.increment_downloads(task.user_id)
+
+    async def _handle_admin_callback(self, query: Any, action: str, context: Any) -> None:
+        if action == "stats":
+            await self.cmd_stats.__wrapped__(self, query, None)  # type: ignore
+        elif action == "toggle_maint":
+            current = self.config.get("maintenance_mode", False)
+            self.config.set("maintenance_mode", not current)
+            state = "AKTIF ⚠️" if not current else "NONAKTIF ✅"
+            await self._safe_edit(query, f"🛠 Maintenance mode sekarang: <b>{state}</b>")
+        elif action == "logs":
+            log_path = Path("bot_logs.log")
+            if log_path.exists():
+                with log_path.open("rb") as fh:
+                    await query.message.reply_document(document=fh, filename="bot_logs.log")
+            else:
+                await query.answer("Log file tidak ditemukan.", show_alert=True)
+        elif action == "reload_config":
+            self.config._data = self.config._load()
+            await query.answer("✅ Config di-reload!", show_alert=True)
+        elif action == "broadcast_hint":
+            # Mark chat as pending broadcast - NEXT message from admin = broadcast text
+            self._broadcast_prompts[query.message.chat_id] = True
+            await query.message.reply_html(
+                "📢 <b>Mode Broadcast Aktif</b>\n\n"
+                "✏️ Ketik dan kirim pesan broadcast kamu sekarang.\n"
+                "Pesan <b>berikutnya</b> yang kamu kirim akan diteruskan ke semua user.\n\n"
+                "<i>HTML: &lt;b&gt;bold&lt;/b&gt;, &lt;i&gt;italic&lt;/i&gt;, dll.</i>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Batalkan Broadcast", callback_data="cancel_broadcast")
+                ]])
+            )
+            await query.answer("✅ Ketik pesan broadcast kamu!")
+        elif action == "users":
+            users = sorted(self.user_db.all_users(), key=lambda u: u.download_count, reverse=True)[:10]
+            lines = ["👥 <b>Top 10 Users:</b>\n"]
+            for i, rec in enumerate(users, 1):
+                lines.append(f"{i}. {_esc(rec.first_name)} ({rec.user_id}) — {rec.download_count} DL")
+            await query.message.reply_html("\n".join(lines))
+
+    async def _handle_settings_callback(self, query: Any, user: Any, setting: str) -> None:
+        rec = self.user_db.get_or_create(user.id, user.username or "", user.first_name or "")
+        prefs = rec.preferences
+
+        if setting == "quality":
+            options = list(QualityPreset)
+            current_idx = options.index(prefs.quality)
+            prefs.quality = options[(current_idx + 1) % len(options)]
+            self.user_db._save()
+            await query.answer(f"✅ Kualitas diubah ke: {prefs.quality.value}", show_alert=False)
+
+        elif setting == "audio_fmt":
+            fmts = ["mp3", "m4a", "ogg", "flac"]
+            idx = fmts.index(prefs.audio_format) if prefs.audio_format in fmts else 0
+            prefs.audio_format = fmts[(idx + 1) % len(fmts)]
+            self.user_db._save()
+            await query.answer(f"✅ Format audio: {prefs.audio_format.upper()}", show_alert=False)
+
+        elif setting == "audio_quality":
+            qualities = ["128", "192", "256", "320"]
+            idx = qualities.index(prefs.audio_quality) if prefs.audio_quality in qualities else 1
+            prefs.audio_quality = qualities[(idx + 1) % len(qualities)]
+            self.user_db._save()
+            await query.answer(f"✅ Bitrate: {prefs.audio_quality} kbps", show_alert=False)
+
+        elif setting == "notif":
+            prefs.notification_on_complete = not prefs.notification_on_complete
+            self.user_db._save()
+            state = "ON" if prefs.notification_on_complete else "OFF"
+            await query.answer(f"🔔 Notifikasi: {state}", show_alert=False)
+
+        # Refresh settings message
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🏆 Kualitas: {prefs.quality.value}", callback_data="set|quality")],
+            [
+                InlineKeyboardButton(f"🎵 Audio: {prefs.audio_format.upper()}", callback_data="set|audio_fmt"),
+                InlineKeyboardButton(f"⚡ Bitrate: {prefs.audio_quality}kbps", callback_data="set|audio_quality"),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if prefs.notification_on_complete else '❌'} Notifikasi Selesai",
+                    callback_data="set|notif"
+                )
+            ],
+            [InlineKeyboardButton("✖️ Tutup", callback_data="cancel_info")],
+        ])
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ERROR HANDLER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.exception("Unhandled exception: %s", context.error)
+        if update and isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_html(
+                    "❌ <b>Terjadi kesalahan tak terduga.</b>\n"
+                    "Tim kami akan segera menginvestigasi. Silakan coba lagi."
+                )
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # UTILITY METHODS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _get_uptime(self) -> str:
+        delta = datetime.datetime.now() - self.start_time
+        days, rem = divmod(int(delta.total_seconds()), 86400)
+        hours, rem = divmod(rem, 3600)
+        mins, secs = divmod(rem, 60)
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if mins:
+            parts.append(f"{mins}m")
+        parts.append(f"{secs}s")
+        return " ".join(parts)
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Public API for external integrations (e.g. GUI tab)."""
+        stats = self.user_db.stats()
+        return {
+            **stats,
+            "uptime_seconds": (datetime.datetime.now() - self.start_time).total_seconds(),
+            "queue_size": self.dl_queue._queue.qsize(),
+        }
+
+    def get_user_stats(self) -> List[Dict[str, Any]]:
+        return [rec.to_dict() for rec in self.user_db.all_users()]
+
+    def update_user_status(self, user_id: int, new_status: str) -> bool:
+        try:
+            status = UserStatus(new_status)
+        except ValueError:
+            return False
+        rec = self.user_db.get(user_id)
+        if not rec:
+            return False
+        rec.status = status
+        self.user_db._save()
+        return True
+
+    def is_user_blocked(self, user_id: int) -> bool:
+        return self.user_db.is_banned(user_id)
+
+    def integrate_with_main_app(self) -> None:
+        if self.parent_app:
+            logger.info("Bot integrated with main application")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # LIFECYCLE
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def run(self) -> None:
+        """Start the bot with polling (blocking)."""
+        logger.info("Starting bot...")
+        self.application.post_init = self._post_init
+        self.application.post_shutdown = self._post_shutdown
+        self.application.run_polling(
+            allowed_updates=["message", "callback_query", "inline_query"],
+            drop_pending_updates=True,
+        )
+
+    def stop(self) -> None:
+        """Request shutdown (called externally)."""
+        if self.application:
+            try:
+                self.application.stop()
+            except Exception as exc:
+                logger.error("Error stopping bot: %s", exc)
+
+
+# ─────────────────────────────────── Main ─────────────────────────────────────
 
 def main() -> None:
-    """Main function."""
-    # Create and run the bot
+    """Entry point when running as standalone script."""
     bot = TelegramBot()
-    bot.run()
+    try:
+        bot.run()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped by user")
+    except ValueError as exc:
+        logger.critical("Configuration error: %s", exc)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
