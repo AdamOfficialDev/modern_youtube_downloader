@@ -12,6 +12,7 @@ Format kode: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX  (25 chars + 4 dashes)
 """
 
 import hashlib
+import hmac
 import json
 import os
 import requests
@@ -35,6 +36,23 @@ PLANS = {
     'E': {'name': 'Enterprise', 'days': 365,  'label': '1 Tahun',     'color': '#2ecc71'},
     'L': {'name': 'Lifetime',   'days': None, 'label': 'Selamanya ∞', 'color': '#e74c3c'},
 }
+
+
+# ── Kode aktivasi ADMIN (diverifikasi lokal, tanpa server) ─────────────────────
+# Yang disimpan di sini hanya HASH (PBKDF2) dari kode admin, BUKAN kodenya.
+# Kode admin acak 25 karakter (~120 bit) → aman walau repo publik: hash ini
+# tidak bisa dibalik jadi kode. Isi otomatis lewat `python admin_tool.py new`.
+# Kosongkan string ini untuk menonaktifkan fitur admin sepenuhnya.
+ADMIN_CODE_HASH   = "9f0627bacb63f81e12ef8bf111f08cf9$b90011e12afc0c868e19631bcb71c6bce52ef0dd847fffcaeba2fbee9e8264b8"      # format: "<salt_hex>$<hash_hex>"
+ADMIN_CODE_PREFIX = "A"     # kode admin selalu diawali 'A' (plan biasa: T/B/P/E/L)
+ADMIN_KDF_ROUNDS  = 200_000
+
+
+def hash_admin_code(raw_code: str, salt: bytes) -> str:
+    """PBKDF2-SHA256 dari kode (25 char tanpa dash, uppercase) → hex."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", raw_code.encode(), salt, ADMIN_KDF_ROUNDS
+    ).hex()
 
 
 def get_machine_id() -> str:
@@ -116,6 +134,27 @@ class LicenseManager:
             return raw
         return f"{raw[0:5]}-{raw[5:10]}-{raw[10:15]}-{raw[15:20]}-{raw[20:25]}"
 
+    # ── Admin code ────────────────────────────────────────────────────────────
+
+    def _is_admin_code(self, code: str) -> bool:
+        """True jika `code` adalah kode aktivasi admin (cek hash lokal)."""
+        if not ADMIN_CODE_HASH:
+            return False
+        raw = self._clean(code)
+        # Pre-filter murah: kode biasa (T/B/P/E/L...) tidak perlu kena PBKDF2
+        if len(raw) != 25 or not raw.startswith(ADMIN_CODE_PREFIX):
+            return False
+        try:
+            salt_hex, hash_hex = ADMIN_CODE_HASH.split("$", 1)
+            candidate = hash_admin_code(raw, bytes.fromhex(salt_hex))
+            return hmac.compare_digest(candidate, hash_hex)
+        except Exception:
+            return False
+
+    def is_admin(self) -> bool:
+        """True jika lisensi yang aktif sekarang adalah kode admin."""
+        return self._is_admin_code(self.get_active_code() or "")
+
     # ── Cache helpers ─────────────────────────────────────────────────────────
 
     def get_active_code(self) -> str | None:
@@ -174,6 +213,13 @@ class LicenseManager:
         if len(self._clean(code)) != 25:
             return {"ok": False, "found": False, "valid": False,
                     "error": "format", "msg": "Format kode salah"}
+
+        # Kode admin: dikenali lokal, tidak perlu tanya server
+        if self._is_admin_code(code):
+            return {"ok": True, "found": True, "valid": True,
+                    "plan_name": "Administrator", "label": "Selamanya ∞",
+                    "status": "inactive", "expires_at": None, "lifetime": True,
+                    "msg": "Administrator · Selamanya ∞ · Siap diaktivasi"}
 
         url = f"{SERVER_URL}/api/preview"
         print(f"[LicenseMgr] preview → {url}?code={formatted}")
@@ -263,6 +309,19 @@ class LicenseManager:
         formatted = self._format_code(code)
         if len(self._clean(code)) != 25:
             return False, "Format kode salah — harus 25 karakter (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)"
+
+        # Kode admin: aktivasi lokal, tanpa server
+        if self._is_admin_code(code):
+            self._save_cache({
+                "code":       formatted,
+                "plan":       "Administrator",
+                "label":      "Selamanya ∞",
+                "expires_at": None,
+                "lifetime":   True,
+                "machine_id": self._machine_id,
+            })
+            return True, "✅ Aktivasi administrator berhasil!"
+
         try:
             resp = requests.post(
                 f"{SERVER_URL}/api/activate",
@@ -308,6 +367,11 @@ class LicenseManager:
         code = cache.get("code", "")
         if not code:
             return False
+
+        # Admin: kode di cache diverifikasi ULANG lewat hash tiap kali — file
+        # .license yang diedit manual tidak bisa jadi admin tanpa tahu kodenya.
+        if self._is_admin_code(code):
+            return True
 
         # ── STEP 1: Cek expires_at dari cache ─────────────────────────────────
         # expires_at ini ditulis oleh SERVER saat aktivasi/verify — bukan kalkulasi lokal.

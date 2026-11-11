@@ -48,7 +48,7 @@
 ### How to Activate
 
 1. Run the application — an **activation dialog** will appear automatically
-2. Enter your license key (format: `XXXX-XXXX-XXXX-XXXX`)
+2. Enter your license key (format: `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`)
 3. Click **"Activate"**
 4. If successful, the app will open immediately ✅
 
@@ -71,6 +71,38 @@ After 72 hours, an online check is required to re-verify your license.
 
 Contact the developer to reset your machine binding — your old key will be revoked and a new one issued.  
 See [Contact →](#-contact)
+
+### 🔐 Admin Activation Code (for the developer)
+
+The app owner can activate the app with a **special admin code** — no need to open the license server dashboard.
+
+- Typed into the **same activation dialog** as a normal license key
+- Verified **locally** (works offline, never contacts the license server)
+- Grants **Administrator · Lifetime** access
+- Not bound to a device
+
+**Setup (once):**
+
+```bash
+python admin_tool.py new
+```
+
+This generates a random 25-character admin code (format `AXXXX-XXXXX-XXXXX-XXXXX-XXXXX`), installs its **hash** into `src/license_manager.py`, and saves the code to `admin_code.txt`. Store the code in a password manager.
+
+| File | Commit to Git? | Notes |
+|---|---|---|
+| `src/license_manager.py` | ✅ Yes | Contains only a salted PBKDF2 hash — the code cannot be recovered from it |
+| `admin_code.txt` | ❌ **Never** | Contains the actual admin code (already in `.gitignore`) |
+
+**Other commands:**
+
+```bash
+python admin_tool.py verify <CODE>   # check whether a code is the admin code
+python admin_tool.py new --force     # rotate: replace the admin code with a new one
+```
+
+> ⚠️ **Rotating the code:** after `new --force`, rebuild and redistribute the app. Builds released **before** the rotation still accept the old code.  
+> After changing `src/license_manager.py`, rebuild the `.exe` (`build_exe.bat`) so the packaged app includes it.
 
 > 📌 **For admins / developers:** Full documentation on managing license keys, the admin dashboard, and deploying the license server is available at:  
 > 👉 **[github.com/AdamOfficialDev/modern-youtube-downloder-code-activation](https://github.com/AdamOfficialDev/modern-youtube-downloder-code-activation#readme)**
@@ -273,6 +305,7 @@ See [Contact →](#-contact)
 | "License expired" | Renew your license — contact developer |
 | "Cannot connect to server" | Check your internet connection and try again |
 | "License revoked" | Contact developer for assistance |
+| Admin code says "not found" | Run `python admin_tool.py new` first, make sure `src/license_manager.py` contains the generated `ADMIN_CODE_HASH`, and rebuild the `.exe` if you run the packaged app |
 
 ---
 
@@ -286,13 +319,14 @@ modern_youtube_downloader/
 │   └── ffmpeg.zip            # FFmpeg binary
 ├── main.py                   # Main application entry point
 ├── download_ffmpeg.py        # FFmpeg downloader script
+├── admin_tool.py             # Generate the admin activation code (developer only)
 ├── setup.bat                 # Setup script
 ├── run.bat                   # Run script
 ├── Requirements.txt          # Python dependencies
 ├── .gitignore                # Git ignore file
 │
 ├── src/
-│   ├── license_manager.py    # License validation & server connection
+│   ├── license_manager.py    # License validation, server connection & admin code check
 │   └── license_dialog.py     # Activation dialog UI
 │
 └── README.md                 # This document
@@ -306,6 +340,7 @@ modern_youtube_downloader/
 - **Main Application**: `main.py` — Core application with PyQt6 UI
 - **License Manager**: `src/license_manager.py` — Handles online validation, caching, and revoke detection
 - **License Dialog**: `src/license_dialog.py` — Activation UI shown on first launch
+- **Admin Tool**: `admin_tool.py` — Generates the local admin activation code and installs its hash (see [Admin Activation Code](#-admin-activation-code-for-the-developer))
 - **Setup Scripts**:
   - `setup.bat` — Automated installation
   - `download_ffmpeg.py` — FFmpeg downloader
